@@ -1,32 +1,36 @@
 "use client";
 
 import {
+  BookOpen,
   ChevronLeft,
   ChevronRight,
-  Expand,
-  Mic,
   Pause,
   Play,
   RefreshCw,
   RotateCcw,
-  Save,
-  Square,
+  Star,
   Volume2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { StudyCard, SubtitleLine } from "@/lib/local-videos";
 
 type StudyVideo = {
   id: string;
   title: string;
   fileName: string;
   streamUrl: string;
+  subtitleLines: SubtitleLine[];
+  cards: StudyCard[];
 };
 
 type Segment = {
   id: string;
   index: number;
-  start: number;
-  end: number;
+  startTime: number;
+  endTime: number;
+  english: string;
+  chinese: string;
+  cardIds: string[];
 };
 
 const SEGMENT_SECONDS = 5;
@@ -38,42 +42,68 @@ function formatTime(seconds: number) {
   return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
-function makeSegments(duration: number) {
+function makeFallbackSegments(duration: number): Segment[] {
   const safeDuration = Math.max(duration, SEGMENT_SECONDS);
   const count = Math.ceil(safeDuration / SEGMENT_SECONDS);
   return Array.from({ length: count }, (_, index) => {
-    const start = index * SEGMENT_SECONDS;
-    const end = Math.min(start + SEGMENT_SECONDS, safeDuration);
+    const startTime = index * SEGMENT_SECONDS;
+    const endTime = Math.min(startTime + SEGMENT_SECONDS, safeDuration);
     return {
+      cardIds: [],
+      chinese: "请在后台导入字幕后显示中文翻译。",
+      endTime,
+      english: `听写片段 ${String(index + 1).padStart(2, "0")}`,
       id: `segment-${index + 1}`,
       index,
-      start,
-      end,
+      startTime,
     };
   });
 }
 
+function normalizeSubtitleLines(lines: SubtitleLine[]): Segment[] {
+  return lines.map((line, index) => ({
+    cardIds: line.cardIds,
+    chinese: line.chinese,
+    endTime: line.endTime,
+    english: line.english,
+    id: line.id,
+    index,
+    startTime: line.startTime,
+  }));
+}
+
+function findActiveSegment(segments: Segment[], currentTime: number) {
+  return (
+    segments.find(
+      (segment) =>
+        currentTime >= segment.startTime && currentTime < segment.endTime,
+    ) ?? segments[0]
+  );
+}
+
 export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState(0.75);
-  const [loopSegment, setLoopSegment] = useState(true);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [loopSentence, setLoopSentence] = useState(true);
+  const [favorites, setFavorites] = useState<string[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
-  const [recording, setRecording] = useState(false);
-  const [recordingUrl, setRecordingUrl] = useState("");
-  const [error, setError] = useState("");
-
+  const hasTranscript = video.subtitleLines.length > 0;
   const noteKey = `shadow-local-notes:${video.id}`;
-  const segments = useMemo(() => makeSegments(duration), [duration]);
-  const activeSegment =
-    segments.find(
-      (segment) => currentTime >= segment.start && currentTime < segment.end,
-    ) ?? segments[0];
+
+  const segments = useMemo(
+    () =>
+      hasTranscript
+        ? normalizeSubtitleLines(video.subtitleLines)
+        : makeFallbackSegments(duration),
+    [duration, hasTranscript, video.subtitleLines],
+  );
+  const activeSegment = findActiveSegment(segments, currentTime);
+  const activeCards = video.cards.filter((card) =>
+    activeSegment?.cardIds.includes(card.id),
+  );
 
   useEffect(() => {
     const saved = window.localStorage.getItem(noteKey);
@@ -103,17 +133,12 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
 
     function onTimeUpdate() {
       const nextTime = mediaEl.currentTime;
-      const nextSegment =
-        segments.find(
-          (segment) => nextTime >= segment.start && nextTime < segment.end,
-        ) ?? segments[0];
-
-      if (loopSegment && nextSegment && nextTime >= nextSegment.end - 0.04) {
-        mediaEl.currentTime = nextSegment.start;
-        setCurrentTime(nextSegment.start);
+      const segment = findActiveSegment(segments, nextTime);
+      if (loopSentence && segment && nextTime >= segment.endTime - 0.04) {
+        mediaEl.currentTime = segment.startTime;
+        setCurrentTime(segment.startTime);
         return;
       }
-
       setCurrentTime(nextTime);
     }
 
@@ -136,7 +161,7 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
       mediaEl.removeEventListener("play", onPlay);
       mediaEl.removeEventListener("pause", onPause);
     };
-  }, [loopSegment, segments]);
+  }, [loopSentence, segments]);
 
   async function togglePlay() {
     const media = videoRef.current;
@@ -160,85 +185,48 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
   }
 
   function seekSegment(segment: Segment) {
-    seek(segment.start);
+    seek(segment.startTime);
   }
 
   function moveSegment(offset: -1 | 1) {
+    const currentIndex = activeSegment?.index ?? 0;
     const nextIndex = Math.min(
-      Math.max(activeSegment.index + offset, 0),
+      Math.max(currentIndex + offset, 0),
       segments.length - 1,
     );
     seekSegment(segments[nextIndex]);
   }
 
   function replaySegment() {
+    if (!activeSegment) return;
     seekSegment(activeSegment);
-    if (isPlaying) {
-      void videoRef.current?.play();
-    }
-  }
-
-  function saveNotes(nextNotes = notes) {
-    window.localStorage.setItem(noteKey, JSON.stringify(nextNotes));
+    if (isPlaying) void videoRef.current?.play();
   }
 
   function updateNote(value: string) {
+    if (!activeSegment) return;
     const nextNotes = { ...notes, [activeSegment.id]: value };
     setNotes(nextNotes);
-    saveNotes(nextNotes);
+    window.localStorage.setItem(noteKey, JSON.stringify(nextNotes));
   }
 
-  async function startRecording() {
-    setError("");
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      setError("当前浏览器不支持录音。");
-      return;
-    }
-
-    try {
-      if (recordingUrl) {
-        URL.revokeObjectURL(recordingUrl);
-        setRecordingUrl("");
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      chunksRef.current = [];
-      const recorder = new MediaRecorder(stream);
-      recorderRef.current = recorder;
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
-      };
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
-        setRecordingUrl(URL.createObjectURL(blob));
-        streamRef.current?.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      };
-
-      recorder.start();
-      setRecording(true);
-    } catch {
-      setError("无法访问麦克风，请检查浏览器权限。");
-    }
-  }
-
-  function stopRecording() {
-    recorderRef.current?.stop();
-    recorderRef.current = null;
-    setRecording(false);
+  function toggleFavorite(segmentId: string) {
+    setFavorites((current) =>
+      current.includes(segmentId)
+        ? current.filter((id) => id !== segmentId)
+        : [...current, segmentId],
+    );
   }
 
   return (
-    <main className="min-h-[calc(100vh-4rem)] bg-white text-[#14131f]">
-      <section className="demo-grid grid min-h-[calc(100vh-4rem)]">
-        <div className="min-w-0 border-r border-[#eee9f3] bg-white">
-          <div className="relative bg-[#303030]">
+    <main className="h-[calc(100vh-7.5rem)] min-h-[680px] bg-white text-[#14131f]">
+      <section className="grid h-full grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] xl:grid-cols-[minmax(0,1fr)_360px_360px]">
+        <div className="flex min-w-0 flex-col border-r border-[#eee9f3] bg-white">
+          <div className="relative flex-1 bg-[#303030]">
             <video
               ref={videoRef}
               src={video.streamUrl}
-              className="aspect-video w-full bg-[#303030] object-contain"
+              className="h-full max-h-full w-full bg-[#303030] object-contain"
               playsInline
               preload="metadata"
             />
@@ -277,7 +265,6 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
                   aria-label="视频进度"
                 />
                 <Volume2 size={18} />
-                <Expand size={17} />
               </div>
             </div>
           </div>
@@ -289,20 +276,20 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
             </span>
           </div>
 
-          <div className="mx-auto flex h-[78px] max-w-[560px] items-center justify-between border-b-4 border-[#f2e8fb] px-4 text-[#7d738b]">
+          <div className="mx-auto flex h-[88px] w-full max-w-[560px] items-center justify-between border-b-4 border-[#f2e8fb] px-4 text-[#7d738b]">
             <button
               type="button"
-              title="片段循环"
-              onClick={() => setLoopSegment((value) => !value)}
+              title="单句循环"
+              onClick={() => setLoopSentence((value) => !value)}
               className={`grid size-11 place-items-center rounded-md ${
-                loopSegment ? "text-[#9b4bf4]" : "text-[#7d738b]"
+                loopSentence ? "text-[#9b4bf4]" : "text-[#7d738b]"
               }`}
             >
               <RefreshCw size={22} />
             </button>
             <button
               type="button"
-              title="上一段"
+              title="上一句"
               onClick={() => moveSegment(-1)}
               className="grid size-11 place-items-center rounded-md"
             >
@@ -321,7 +308,7 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
             </button>
             <button
               type="button"
-              title="下一段"
+              title="下一句"
               onClick={() => moveSegment(1)}
               className="grid size-11 place-items-center rounded-md"
             >
@@ -329,7 +316,7 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
             </button>
             <button
               type="button"
-              title="重播当前段"
+              title="重播当前句"
               onClick={replaySegment}
               className="grid size-11 place-items-center rounded-md"
             >
@@ -340,8 +327,9 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
 
         <aside className="flex min-h-0 flex-col bg-white">
           <div className="flex h-[58px] items-center justify-between border-b border-[#eee9f3] px-4">
-            <h2 className="text-base font-black">听力练习</h2>
+            <h2 className="text-base font-black">动态字幕</h2>
             <div className="flex items-center gap-4 text-xs font-black text-[#b08ee4]">
+              <button type="button">双语</button>
               {[0.75, 1, 1.25].map((rate) => (
                 <button
                   key={rate}
@@ -352,83 +340,128 @@ export function LocalStudyPlayer({ video }: { video: StudyVideo }) {
                   {rate}x
                 </button>
               ))}
-              <button type="button" onClick={() => setLoopSegment((v) => !v)}>
-                {loopSegment ? "循环" : "顺序"}
-              </button>
-              <button
-                type="button"
-                onClick={recording ? stopRecording : startRecording}
-                className="flex items-center gap-1"
-              >
-                {recording ? <Square size={13} /> : <Mic size={13} />}
-                跟读
+              <button type="button" onClick={() => setLoopSentence((v) => !v)}>
+                {loopSentence ? "单句" : "顺序"}
               </button>
             </div>
           </div>
 
-          <section className="border-b border-[#f2edf6] bg-[#fbf8ff] p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-black text-[#b08ee4]">
-                  {formatTime(activeSegment.start)} - {formatTime(activeSegment.end)}
-                </p>
-                <h3 className="mt-1 text-lg font-black">
-                  听写片段 {String(activeSegment.index + 1).padStart(2, "0")}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => saveNotes()}
-                className="grid size-10 place-items-center rounded-xl bg-white text-[#9b4bf4] shadow-sm"
-                aria-label="保存听写"
-              >
-                <Save size={18} />
-              </button>
+          {!hasTranscript && (
+            <div className="border-b border-[#f2edf6] bg-[#fff8e6] px-4 py-3 text-sm font-bold text-[#8a5a00]">
+              这个视频还没有导入字幕，当前使用 5 秒听写片段。请在后台导入 .srt 或字幕 JSON。
             </div>
-            <textarea
-              value={notes[activeSegment.id] ?? ""}
-              onChange={(event) => updateNote(event.target.value)}
-              placeholder="写下你听到的英文..."
-              className="mt-4 min-h-32 w-full resize-none rounded-2xl border border-[#eadff2] bg-white p-4 text-base font-semibold leading-7 text-[#202033] placeholder:text-[#c0b3cc]"
-            />
-            {recordingUrl && (
-              <audio controls src={recordingUrl} className="mt-4 w-full">
-                <track kind="captions" />
-              </audio>
-            )}
-            {error && (
-              <p className="mt-3 rounded-xl bg-[#fff1f2] px-3 py-2 text-sm font-semibold text-[#be123c]">
-                {error}
-              </p>
-            )}
-          </section>
+          )}
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
             {segments.map((segment) => {
-              const active = segment.id === activeSegment.id;
+              const active = activeSegment?.id === segment.id;
+              const starred = favorites.includes(segment.id);
               return (
-                <button
+                <article
                   key={segment.id}
-                  type="button"
-                  onClick={() => seekSegment(segment)}
-                  className={`mb-3 block w-full rounded-2xl border px-4 py-4 text-left ${
-                    active
-                      ? "border-[#d7c2f4] bg-[#fbf8ff]"
-                      : "border-[#f2edf6] bg-white hover:bg-[#fbf8ff]"
+                  className={`border-b border-[#f2edf6] px-1 py-4 ${
+                    active ? "bg-[#fbf8ff]" : "bg-white"
                   }`}
                 >
-                  <span className="text-xs font-black text-[#b9a5d4]">
-                    {formatTime(segment.start)} - {formatTime(segment.end)}
-                  </span>
-                  <span className="mt-2 block text-base font-black text-[#151522]">
-                    听写片段 {String(segment.index + 1).padStart(2, "0")}
-                  </span>
-                  <span className="mt-1 block text-sm leading-6 text-[#8b8192]">
-                    {notes[segment.id] ? notes[segment.id] : "暂无听写内容"}
-                  </span>
-                </button>
+                  <div className="mb-2 flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => seekSegment(segment)}
+                      className="text-xs font-black text-[#b9a5d4]"
+                    >
+                      {formatTime(segment.startTime)}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={starred ? "取消收藏" : "收藏"}
+                      onClick={() => toggleFavorite(segment.id)}
+                      className="text-[#ddb7ef]"
+                    >
+                      <Star size={20} fill={starred ? "currentColor" : "none"} />
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => seekSegment(segment)}
+                    className="block w-full text-left"
+                  >
+                    <p className="text-[17px] font-black leading-8 text-[#151522]">
+                      {segment.english}
+                    </p>
+                    <p className="mt-1 text-[15px] leading-7 text-[#8b8192]">
+                      {segment.chinese}
+                    </p>
+                  </button>
+                  {!hasTranscript && active && (
+                    <textarea
+                      value={notes[segment.id] ?? ""}
+                      onChange={(event) => updateNote(event.target.value)}
+                      placeholder="写下你听到的英文..."
+                      className="mt-3 min-h-24 w-full resize-none rounded-2xl border border-[#eadff2] bg-white p-3 text-sm font-semibold leading-6 text-[#202033] placeholder:text-[#c0b3cc]"
+                    />
+                  )}
+                </article>
               );
             })}
+          </div>
+        </aside>
+
+        <aside className="hidden min-h-0 flex-col border-l border-[#eee9f3] bg-[#fbfaff] xl:flex">
+          <div className="flex h-[58px] items-center justify-between border-b border-[#eee9f3] bg-white px-4">
+            <h2 className="flex items-center gap-2 text-base font-black">
+              <BookOpen size={17} className="text-[#a129f0]" />
+              精读卡片
+            </h2>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {activeCards.length === 0 ? (
+              <div className="grid min-h-52 place-items-center rounded-2xl border border-dashed border-[#dccdec] bg-white p-5 text-center text-sm font-bold leading-7 text-[#8b8192]">
+                {video.cards.length === 0
+                  ? "暂无精读卡片。可在后台导入 cards JSON。"
+                  : "当前句没有关联精读卡片。"}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {activeCards.map((card) => (
+                  <article
+                    key={card.id}
+                    className="rounded-2xl border border-[#eadff2] bg-white p-4 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-lg font-black">{card.term}</h3>
+                        {card.phonetic && (
+                          <p className="mt-1 text-xs font-black text-[#9b6ff2]">
+                            {card.phonetic}
+                          </p>
+                        )}
+                      </div>
+                      <span className="rounded-xl bg-[#f4ecfb] px-3 py-1 text-xs font-black text-[#a129f0]">
+                        {card.type}
+                      </span>
+                    </div>
+                    <p className="mt-3 text-sm font-black leading-6 text-[#151522]">
+                      {card.meaning}
+                    </p>
+                    {card.note && (
+                      <p className="mt-2 text-sm leading-6 text-[#8b8192]">
+                        {card.note}
+                      </p>
+                    )}
+                    {card.example && (
+                      <div className="mt-3 rounded-xl border-l-4 border-[#c9a7ff] bg-[#fbf8ff] p-3 text-sm italic leading-6 text-[#5f536f]">
+                        “{card.example}”
+                        {card.translation && (
+                          <p className="mt-2 text-xs not-italic text-[#8b8192]">
+                            {card.translation}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
           </div>
         </aside>
       </section>

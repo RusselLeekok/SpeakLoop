@@ -1,5 +1,12 @@
 import Link from "next/link";
-import { CalendarClock, FolderOpen, Play, Video } from "lucide-react";
+import {
+  BookOpenCheck,
+  CalendarClock,
+  Captions,
+  FolderOpen,
+  Play,
+  Video,
+} from "lucide-react";
 import { AppShell } from "@/components/layout/app-shell";
 import { formatFileSize, getLocalVideos } from "@/lib/local-videos";
 
@@ -14,6 +21,7 @@ function formatDate(value: string) {
 
 export default async function LibraryPage() {
   const videos = await getLocalVideos();
+  const configured = videos.filter((video) => video.hasSubtitle).length;
 
   return (
     <AppShell>
@@ -26,13 +34,29 @@ export default async function LibraryPage() {
                 登录后视频库
               </h1>
               <p className="mt-3 text-sm font-semibold text-[#81758e]">
-                已读取本地目录 D:\videoes，点击任意卡片进入播放页。
+                已读取 D:\videoes。配置字幕后，播放页会进入逐句动态字幕学习模式。
               </p>
             </div>
-            <div className="flex items-center gap-3 rounded-2xl bg-[#fbf7ff] px-4 py-3 text-sm font-black text-[#665b73]">
-              <FolderOpen className="text-[#a129f0]" size={20} />
-              {videos.length} 个视频
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-3 rounded-2xl bg-[#fbf7ff] px-4 py-3 text-sm font-black text-[#665b73]">
+                <FolderOpen className="text-[#a129f0]" size={20} />
+                {videos.length} 个视频
+              </div>
+              <Link
+                href="/admin"
+                className="rounded-2xl bg-gradient-to-r from-[#a129f0] to-[#ed3d9a] px-4 py-3 text-sm font-black text-white"
+              >
+                导入字幕
+              </Link>
             </div>
+          </div>
+          <div className="mt-5 flex flex-wrap gap-3 text-xs font-black text-[#81758e]">
+            <span className="rounded-full bg-[#f4ecfb] px-3 py-2 text-[#a129f0]">
+              已配置字幕 {configured}
+            </span>
+            <span className="rounded-full bg-[#f4ecfb] px-3 py-2">
+              未配置字幕 {videos.length - configured}
+            </span>
           </div>
         </section>
 
@@ -42,7 +66,7 @@ export default async function LibraryPage() {
               <Video className="mx-auto text-[#a129f0]" size={42} />
               <h2 className="mt-5 text-2xl font-black">还没有找到视频</h2>
               <p className="mt-3 text-sm font-semibold text-[#81758e]">
-                请把 .mp4 / .webm / .mov / .m4v 文件放到 D:\videoes。
+                请把视频放到 D:\videoes，或在后台导入视频和字幕。
               </p>
             </div>
           </section>
@@ -66,6 +90,9 @@ export default async function LibraryPage() {
                   <span className="absolute left-4 top-4 rounded-full bg-white/92 px-3 py-1 text-xs font-black text-[#a129f0]">
                     #{String(index + 1).padStart(2, "0")}
                   </span>
+                  <span className="absolute right-4 top-4 rounded-full bg-black/55 px-3 py-1 text-xs font-black text-white backdrop-blur">
+                    {video.hasSubtitle ? "动态字幕" : "未配字幕"}
+                  </span>
                   <span className="absolute left-1/2 top-1/2 grid size-14 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-gradient-to-r from-[#a129f0] to-[#ed3d9a] text-white shadow-lg group-hover:scale-110">
                     <Play size={25} fill="currentColor" />
                   </span>
@@ -86,6 +113,14 @@ export default async function LibraryPage() {
                   <span className="flex items-center gap-2">
                     <CalendarClock size={15} className="text-[#a129f0]" />
                     {formatDate(video.updatedAt)}
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <Captions size={15} className="text-[#a129f0]" />
+                    {video.hasSubtitle ? "已配置字幕" : "fallback 5 秒听写"}
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <BookOpenCheck size={15} className="text-[#a129f0]" />
+                    {video.hasCards ? "已配置精读卡片" : "暂无精读卡片"}
                   </span>
                 </div>
               </Link>
