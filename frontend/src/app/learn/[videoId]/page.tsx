@@ -1,0 +1,1088 @@
+"use client";
+
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useQuery } from "@tanstack/react-query";
+import {
+  ArrowLeft,
+  ChevronDown,
+  ListRestart,
+  Pause,
+  Play,
+  Repeat,
+  RotateCcw,
+  RotateCw,
+  SkipBack,
+  SkipForward,
+  Volume2,
+  X,
+} from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
+import { api } from "@/lib/api";
+import { useAuthStore } from "@/lib/auth";
+import { getLocalProgress, saveLocalProgress } from "@/lib/local-progress";
+import type { Progress, Subtitle, VideoDetail } from "@/lib/types";
+import { cn, formatDuration, formatMs } from "@/lib/utils";
+
+function findCurrentSubtitle(currentMs: number, subtitles: Subtitle[]) {
+  let left = 0;
+  let right = subtitles.length - 1;
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+    const item = subtitles[mid];
+    if (currentMs < item.start_ms) right = mid - 1;
+    else if (currentMs >= item.end_ms) left = mid + 1;
+    else return { subtitle: item, index: mid };
+  }
+  return { subtitle: null, index: -1 };
+}
+
+function findNextIndex(currentMs: number, subtitles: Subtitle[]) {
+  let left = 0;
+  let right = subtitles.length;
+  while (left < right) {
+    const mid = Math.floor((left + right) / 2);
+    if (subtitles[mid].start_ms <= currentMs) left = mid + 1;
+    else right = mid;
+  }
+  return left;
+}
+
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+type SubtitleLanguage = "both" | "zh" | "en";
+type PracticeMode = "off" | "blind" | "blank" | "repeat" | "intensive";
+
+const LANGUAGE_OPTIONS: { value: SubtitleLanguage; label: string }[] = [
+  { value: "both", label: "双语" },
+  { value: "zh", label: "中文" },
+  { value: "en", label: "英语" },
+];
+
+const PRACTICE_OPTIONS: { value: PracticeMode; label: string }[] = [
+  { value: "off", label: "关闭" },
+  { value: "blind", label: "盲听" },
+  { value: "blank", label: "填空" },
+  { value: "repeat", label: "跟读" },
+  { value: "intensive", label: "精读" },
+];
+
+export default function LearnPage() {
+  const params = useParams<{ videoId: string }>();
+  const videoId = Number(params.videoId);
+  const token = useAuthStore((s) => s.token);
+
+  const { data: video, isLoading: videoLoading, error: videoError } = useQuery({
+    queryKey: ["video", videoId],
+    queryFn: () => api.get<VideoDetail>(`/api/videos/${videoId}`),
+    enabled: Number.isFinite(videoId),
+  });
+
+  const { data: subtitles, isLoading: subsLoading } = useQuery({
+    queryKey: ["subtitles", videoId],
+    queryFn: () => api.get<Subtitle[]>(`/api/videos/${videoId}/subtitles`),
+    enabled: Number.isFinite(videoId),
+  });
+
+  const { data: serverProgress, isFetched: progressFetched } = useQuery({
+    queryKey: ["progress", videoId, token],
+    queryFn: () => api.get<Progress | null>(`/api/videos/${videoId}/progress`),
+    enabled: !!token && Number.isFinite(videoId),
+  });
+
+  if (videoError) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-aurora text-foreground">
+        <p className="text-lg font-bold">视频不存在或暂未发布</p>
+        <Button variant="secondary" asChild>
+          <Link href="/">返回首页</Link>
+        </Button>
+      </div>
+    );
+  }
+
+  if (videoLoading || subsLoading || !video || !subtitles || (token && !progressFetched)) {
+    return (
+      <div className="min-h-screen bg-aurora p-6">
+        <div className="mx-auto grid max-w-7xl gap-6 lg:grid-cols-[minmax(0,1fr)_420px]">
+          <div className="space-y-4">
+            <Skeleton className="h-8 w-64 rounded-md" />
+            <Skeleton className="aspect-video w-full rounded-lg" />
+            <Skeleton className="h-28 w-full rounded-lg" />
+          </div>
+          <Skeleton className="hidden h-[80vh] rounded-lg lg:block" />
+        </div>
+      </div>
+    );
+  }
+
+  const initialMs =
+    serverProgress?.last_time_ms ?? getLocalProgress(videoId)?.last_time_ms ?? 0;
+
+  return <Player video={video} subtitles={subtitles} initialMs={initialMs} />;
+}
+
+function Player({
+  video,
+  subtitles,
+  initialMs,
+}: {
+  video: VideoDetail;
+  subtitles: Subtitle[];
+  initialMs: number;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef(new Map<number, HTMLButtonElement>());
+
+  const [currentIndex, setCurrentIndex] = useState(-1);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const [language, setLanguage] = useState<SubtitleLanguage>("both");
+  const [subtitlesHidden, setSubtitlesHidden] = useState(false);
+  const [practiceMode, setPracticeMode] = useState<PracticeMode>("off");
+  const [practiceOpen, setPracticeOpen] = useState(false);
+  const [practiceMenuPosition, setPracticeMenuPosition] = useState({ left: 0, top: 0 });
+  const [looping, setLooping] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [scrollPaused, setScrollPaused] = useState(false);
+  const [timeText, setTimeText] = useState("0:00");
+  const [currentSec, setCurrentSec] = useState(0);
+  const [durationSec, setDurationSec] = useState(video.duration ?? 0);
+  const [restored, setRestored] = useState(initialMs > 3000);
+
+  const currentIndexRef = useRef(-1);
+  const loopTargetRef = useRef<Subtitle | null>(null);
+  const practiceMenuRef = useRef<HTMLDivElement>(null);
+  const practicePopupRef = useRef<HTMLDivElement>(null);
+  const autoScrollRef = useRef(true);
+  const scrollPausedRef = useRef(false);
+  const restoreAppliedRef = useRef(false);
+  autoScrollRef.current = autoScroll;
+  scrollPausedRef.current = scrollPaused;
+
+  const hasZh = useMemo(() => subtitles.some((s) => s.zh_text), [subtitles]);
+
+  const cycleLanguage = useCallback(() => {
+    setLanguage((prev) => {
+      const options = hasZh ? LANGUAGE_OPTIONS : LANGUAGE_OPTIONS.filter((item) => item.value !== "zh");
+      const index = options.findIndex((item) => item.value === prev);
+      return options[(index + 1) % options.length]?.value ?? "both";
+    });
+  }, [hasZh]);
+
+  const scrollToIndex = useCallback(
+    (index: number, behavior: ScrollBehavior = "smooth") => {
+      const container = listRef.current;
+      const sub = subtitles[index];
+      if (!container || !sub) return;
+      const item = itemRefs.current.get(sub.id);
+      if (!item) return;
+      const top = item.offsetTop - container.clientHeight / 2 + item.clientHeight / 2;
+      container.scrollTo({ top: Math.max(0, top), behavior });
+    },
+    [subtitles]
+  );
+
+  useEffect(() => {
+    let rafId: number;
+    const sync = () => {
+      const el = videoRef.current;
+      if (el) {
+        const currentMs = Math.floor(el.currentTime * 1000);
+        const loopTarget = loopTargetRef.current;
+        if (loopTarget && currentMs >= loopTarget.end_ms) {
+          el.currentTime = loopTarget.start_ms / 1000;
+        } else {
+          const { index } = findCurrentSubtitle(currentMs, subtitles);
+          if (index !== currentIndexRef.current) {
+            currentIndexRef.current = index;
+            setCurrentIndex(index);
+            if (index >= 0 && autoScrollRef.current && !scrollPausedRef.current) {
+              scrollToIndex(index);
+            }
+          }
+        }
+      }
+      rafId = requestAnimationFrame(sync);
+    };
+    rafId = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(rafId);
+  }, [subtitles, scrollToIndex]);
+
+  const saveProgress = useCallback(() => {
+    const el = videoRef.current;
+    if (!el || el.currentTime < 1) return;
+    const ms = Math.floor(el.currentTime * 1000);
+    const sub = findCurrentSubtitle(ms, subtitles).subtitle;
+    saveLocalProgress(video.id, ms, sub?.id ?? null);
+    if (useAuthStore.getState().token) {
+      api
+        .put(`/api/videos/${video.id}/progress`, {
+          last_time_ms: ms,
+          last_subtitle_id: sub?.id ?? null,
+        })
+        .catch(() => {});
+    }
+  }, [video.id, subtitles]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (videoRef.current && !videoRef.current.paused) saveProgress();
+    }, 5000);
+    window.addEventListener("beforeunload", saveProgress);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("beforeunload", saveProgress);
+      saveProgress();
+    };
+  }, [saveProgress]);
+
+  useEffect(() => {
+    if (!restored) return;
+    const timer = window.setTimeout(() => setRestored(false), 5000);
+    return () => window.clearTimeout(timer);
+  }, [restored]);
+
+  const applyRestore = useCallback(() => {
+    const el = videoRef.current;
+    if (!el || restoreAppliedRef.current) return;
+    restoreAppliedRef.current = true;
+    const duration = el.duration;
+    if (initialMs > 3000 && (!isFinite(duration) || initialMs / 1000 < duration - 2)) {
+      el.currentTime = initialMs / 1000;
+    }
+  }, [initialMs]);
+
+  const togglePlay = useCallback(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    if (el.paused) void el.play();
+    else el.pause();
+  }, []);
+
+  const seekToSubtitle = useCallback(
+    (index: number, opts: { play?: boolean } = {}) => {
+      const el = videoRef.current;
+      const sub = subtitles[index];
+      if (!el || !sub) return;
+      el.currentTime = sub.start_ms / 1000 + 0.001;
+      if (loopTargetRef.current) loopTargetRef.current = sub;
+      if (opts.play && el.paused) void el.play();
+    },
+    [subtitles]
+  );
+
+  const goPrev = useCallback(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const currentMs = Math.floor(el.currentTime * 1000);
+    const idx = currentIndexRef.current;
+    if (idx > 0) {
+      const sub = subtitles[idx];
+      seekToSubtitle(currentMs - sub.start_ms > 1000 ? idx : idx - 1);
+    } else if (idx === 0) {
+      seekToSubtitle(0);
+    } else {
+      const next = findNextIndex(currentMs, subtitles);
+      seekToSubtitle(Math.max(0, next - 1));
+    }
+  }, [subtitles, seekToSubtitle]);
+
+  const goNext = useCallback(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const currentMs = Math.floor(el.currentTime * 1000);
+    const idx = currentIndexRef.current;
+    if (idx >= 0 && idx < subtitles.length - 1) seekToSubtitle(idx + 1);
+    else if (idx === -1) {
+      const next = findNextIndex(currentMs, subtitles);
+      if (next < subtitles.length) seekToSubtitle(next);
+    }
+  }, [subtitles, seekToSubtitle]);
+
+  const skip = useCallback((seconds: number) => {
+    const el = videoRef.current;
+    if (!el) return;
+    el.currentTime = Math.max(0, el.currentTime + seconds);
+  }, []);
+
+  const toggleLoop = useCallback(() => {
+    setLooping((prev) => {
+      const next = !prev;
+      if (next) {
+        const idx = currentIndexRef.current;
+        loopTargetRef.current =
+          idx >= 0
+            ? subtitles[idx]
+            : subtitles[
+                Math.max(
+                  0,
+                  findNextIndex(Math.floor((videoRef.current?.currentTime ?? 0) * 1000), subtitles) - 1
+                )
+              ] ?? null;
+      } else {
+        loopTargetRef.current = null;
+      }
+      return next;
+    });
+  }, [subtitles]);
+
+  const changeSpeed = useCallback((value: number) => {
+    setSpeed(value);
+    if (videoRef.current) videoRef.current.playbackRate = value;
+  }, []);
+
+  const positionPracticeMenu = useCallback(() => {
+    const rect = practiceMenuRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const menuWidth = 96;
+    const left = Math.min(
+      Math.max(rect.left + rect.width / 2, menuWidth / 2 + 8),
+      window.innerWidth - menuWidth / 2 - 8
+    );
+    const below = rect.bottom + 8;
+    const menuHeight = 190;
+    const top = below + menuHeight > window.innerHeight - 8 ? Math.max(8, rect.top - menuHeight - 8) : below;
+    setPracticeMenuPosition({ left, top });
+  }, []);
+
+  const choosePracticeMode = useCallback((value: PracticeMode) => {
+    setPracticeMode(value);
+    setPracticeOpen(false);
+    if (value === "blind") setSubtitlesHidden(true);
+    if (value === "off") setSubtitlesHidden(false);
+    if (value === "blank" || value === "repeat" || value === "intensive") {
+      setSubtitlesHidden(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        goPrev();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        goNext();
+      } else if (e.key === "r" || e.key === "R") {
+        toggleLoop();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [togglePlay, goPrev, goNext, toggleLoop]);
+
+  useEffect(() => {
+    const container = listRef.current;
+    if (!container) return;
+    const pause = () => setScrollPaused(true);
+    container.addEventListener("wheel", pause, { passive: true });
+    container.addEventListener("touchmove", pause, { passive: true });
+    return () => {
+      container.removeEventListener("wheel", pause);
+      container.removeEventListener("touchmove", pause);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!practiceOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!practiceMenuRef.current?.contains(target) && !practicePopupRef.current?.contains(target)) {
+        setPracticeOpen(false);
+      }
+    };
+    positionPracticeMenu();
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("resize", positionPracticeMenu);
+    window.addEventListener("scroll", positionPracticeMenu, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("resize", positionPracticeMenu);
+      window.removeEventListener("scroll", positionPracticeMenu, true);
+    };
+  }, [practiceOpen, positionPracticeMenu]);
+
+  const currentSub = currentIndex >= 0 ? subtitles[currentIndex] : null;
+  const showEn = language === "both" || language === "en";
+  const showZh = language === "both" || language === "zh";
+  const languageLabel = LANGUAGE_OPTIONS.find((item) => item.value === language)?.label ?? "双语";
+  const practiceLabel = PRACTICE_OPTIONS.find((item) => item.value === practiceMode)?.label ?? "练习";
+
+  return (
+    <div className="flex min-h-screen flex-col bg-aurora text-foreground">
+      <header className="flex h-16 shrink-0 items-center gap-3 border-b-2 border-foreground bg-white/95 px-4 shadow-soft lg:px-6">
+        <Button variant="ghost" size="icon" asChild>
+          <Link href={`/videos/${video.id}`} aria-label="返回素材详情">
+            <ArrowLeft />
+          </Link>
+        </Button>
+        <h1 className="min-w-0 flex-1 truncate text-lg font-bold">{video.title}</h1>
+        <div className="hidden items-center gap-1.5 text-xs font-bold text-muted-foreground sm:flex">
+          <Kbd>Space</Kbd>
+          播放
+          <Kbd>←/→</Kbd>
+          上下句
+          <Kbd>R</Kbd>
+          循环
+        </div>
+      </header>
+
+      <div
+        className={cn(
+          "mx-auto grid h-[calc(100vh-4rem)] min-h-0 w-full max-w-[calc(100vw-12px)] flex-1 overflow-hidden p-2 lg:p-3",
+          practiceMode === "intensive"
+            ? "gap-y-4 lg:max-w-[1680px] lg:grid-cols-[minmax(0,1fr)_330px_330px] lg:gap-x-0"
+            : "gap-4 lg:grid-cols-[minmax(0,1fr)_380px] xl:max-w-[1500px]"
+        )}
+      >
+        <div className="flex min-h-0 min-w-0 flex-col gap-3 lg:h-[calc(100vh-5.5rem)]">
+          <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border-2 border-foreground bg-[#f4efe3] shadow-elevated">
+            <video
+              ref={videoRef}
+              src={video.file_url}
+              className="h-full w-full object-cover"
+              playsInline
+              onPlay={() => setPlaying(true)}
+              onPause={() => {
+                setPlaying(false);
+                saveProgress();
+              }}
+              onLoadedMetadata={(e) => {
+                applyRestore();
+                e.currentTarget.playbackRate = speed;
+                if (isFinite(e.currentTarget.duration)) setDurationSec(e.currentTarget.duration);
+              }}
+              onTimeUpdate={(e) => {
+                setTimeText(formatDuration(e.currentTarget.currentTime));
+                setCurrentSec(e.currentTarget.currentTime);
+              }}
+              onClick={togglePlay}
+            />
+            {restored && initialMs > 3000 && (
+              <div className="absolute left-3 top-3 flex flex-wrap items-center gap-2 rounded-md border-2 border-foreground bg-accent px-3 py-2 text-xs font-bold shadow-soft">
+                已恢复到 {formatDuration(initialMs / 1000)}
+                <button
+                  className="rounded-sm underline underline-offset-4"
+                  onClick={() => {
+                    if (videoRef.current) videoRef.current.currentTime = 0;
+                    setRestored(false);
+                  }}
+                >
+                  从头开始
+                </button>
+                <button className="rounded-sm underline underline-offset-4" onClick={() => setRestored(false)}>
+                  收起
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="surface relative flex h-32 shrink-0 flex-col items-center justify-center gap-2 overflow-hidden rounded-lg px-6 py-4 text-center">
+            {currentSub ? (
+              <div
+                key={currentSub.id}
+                className={cn(
+                  "animate-fade-up space-y-2 transition-all duration-200",
+                  subtitlesHidden && "opacity-60 blur-[6px]"
+                )}
+              >
+                {(showEn || subtitlesHidden) && currentSub.en_text && (
+                  <p className="text-xl font-bold leading-relaxed text-foreground md:text-2xl">
+                    {practiceMode === "blank" ? (
+                      <ClozeText text={currentSub.en_text} />
+                    ) : (
+                      currentSub.en_text
+                    )}
+                  </p>
+                )}
+                {(showZh || subtitlesHidden) &&
+                  (currentSub.zh_text ? (
+                    <p className="text-base font-semibold leading-relaxed text-muted-foreground">
+                      {currentSub.zh_text}
+                    </p>
+                  ) : (
+                    language === "zh" && <p className="text-sm text-muted-foreground">本句暂无中文字幕</p>
+                  ))}
+              </div>
+            ) : (
+              <p
+                className={cn(
+                  "text-sm font-bold text-muted-foreground transition-all duration-200",
+                  subtitlesHidden && "opacity-60 blur-[6px]"
+                )}
+              >
+                {playing ? "等待下一句..." : "点击播放，从第一句开始练习"}
+              </p>
+            )}
+            {subtitlesHidden && <BlindCover className="absolute inset-2 z-20" />}
+          </div>
+
+          <div className="surface shrink-0 rounded-lg px-4 py-3">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="w-12 text-right font-mono text-xs font-bold tabular-nums text-muted-foreground">
+                {timeText}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={durationSec || 0}
+                step={0.1}
+                value={Math.min(currentSec, durationSec || 0)}
+                onChange={(e) => {
+                  if (videoRef.current) videoRef.current.currentTime = Number(e.target.value);
+                }}
+                className="player-seek h-3 flex-1 cursor-pointer rounded-full border-2 border-foreground bg-white"
+                aria-label="播放进度"
+              />
+              <span className="w-12 font-mono text-xs font-bold tabular-nums text-muted-foreground">
+                {formatDuration(durationSec)}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <ControlButton title="快退 5 秒" onClick={() => skip(-5)}>
+                <RotateCcw className="h-4 w-4" />
+                <span className="hidden text-xs md:inline">5s</span>
+              </ControlButton>
+              <ControlButton title="上一句" onClick={goPrev}>
+                <SkipBack className="h-4 w-4" />
+              </ControlButton>
+              <button
+                title="播放 / 暂停"
+                onClick={togglePlay}
+                className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-foreground bg-brand text-foreground shadow-soft transition-transform hover:-translate-y-0.5 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
+              >
+                {playing ? <Pause className="h-5 w-5" /> : <Play className="ml-0.5 h-5 w-5" />}
+              </button>
+              <ControlButton title="下一句" onClick={goNext}>
+                <SkipForward className="h-4 w-4" />
+              </ControlButton>
+              <ControlButton title="快进 5 秒" onClick={() => skip(5)}>
+                <RotateCw className="h-4 w-4" />
+                <span className="hidden text-xs md:inline">5s</span>
+              </ControlButton>
+              <ControlButton title="当前句循环" onClick={toggleLoop} active={looping}>
+                <Repeat className="h-4 w-4" />
+                <span className="text-xs">循环</span>
+              </ControlButton>
+              <select
+                title="播放速度"
+                value={speed}
+                onChange={(e) => changeSpeed(Number(e.target.value))}
+                className="h-10 rounded-md border-2 border-foreground bg-white px-2.5 text-sm font-bold shadow-soft focus:outline-none"
+              >
+                {SPEEDS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}x
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <aside
+          className={cn(
+            "surface flex min-h-[50vh] flex-col overflow-visible rounded-lg lg:h-[calc(100vh-5.5rem)] lg:min-h-0",
+            practiceMode === "intensive" && "lg:rounded-r-none lg:border-r-0"
+          )}
+        >
+          <div className="relative z-40 flex flex-wrap items-center justify-between gap-2 rounded-t-lg border-b-2 border-foreground/10 bg-white px-4 py-3">
+            <h2 className="text-base font-black">
+              动态字幕 <span className="text-sm font-bold text-muted-foreground">{subtitles.length} 句</span>
+            </h2>
+            <div className="flex items-center gap-1.5 text-[12px] font-black text-[#b695ff]">
+              <ToolbarButton onClick={cycleLanguage} title="切换字幕语言">
+                {languageLabel}
+              </ToolbarButton>
+              <ToolbarButton
+                onClick={() => {
+                  setSubtitlesHidden((prev) => {
+                    const next = !prev;
+                    if (!next && practiceMode === "blind") setPracticeMode("off");
+                    return next;
+                  });
+                }}
+                title={subtitlesHidden ? "显示字幕" : "隐藏字幕"}
+                active={subtitlesHidden}
+              >
+                {subtitlesHidden ? "隐藏" : "字幕"}
+              </ToolbarButton>
+              <div ref={practiceMenuRef} className="relative">
+                <ToolbarButton
+                  onClick={() => {
+                    positionPracticeMenu();
+                    setPracticeOpen((prev) => !prev);
+                  }}
+                  title="选择练习模式"
+                  active={practiceMode !== "off" || practiceOpen}
+                >
+                  {practiceMode === "off" ? "练习" : practiceLabel}
+                  <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", practiceOpen && "rotate-180")} />
+                </ToolbarButton>
+              </div>
+              <label className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground">
+                <Switch checked={autoScroll} onCheckedChange={setAutoScroll} />
+                跟随
+              </label>
+            </div>
+          </div>
+
+          <div
+            ref={listRef}
+            className="thin-scrollbar fade-mask-y relative z-0 flex-1 overflow-y-auto scroll-smooth rounded-b-lg bg-white lg:max-h-[calc(100vh-10.5rem)]"
+          >
+            <ol className="relative divide-y-2 divide-foreground/15 py-2">
+              {subtitles.map((sub, i) => {
+                const active = i === currentIndex;
+                return (
+                  <li key={sub.id}>
+                    <button
+                      ref={(el) => {
+                        if (el) itemRefs.current.set(sub.id, el);
+                        else itemRefs.current.delete(sub.id);
+                      }}
+                      onClick={() => {
+                        seekToSubtitle(i, { play: true });
+                        setScrollPaused(false);
+                      }}
+                      className={cn(
+                        "relative block w-full border-l-4 px-4 py-3 text-left transition-colors",
+                        active
+                          ? "border-l-foreground bg-accent/70 text-foreground"
+                          : "border-l-transparent text-foreground hover:bg-accent/30"
+                      )}
+                    >
+                      {practiceMode === "blank" && sub.en_text && (
+                        <span className="absolute right-4 top-3 rounded-full bg-[#f3eaff] px-2 py-0.5 text-[11px] font-black text-[#9a63ff]">
+                          0/1
+                        </span>
+                      )}
+                      <span
+                        className={cn(
+                          "mb-1 block font-mono text-xs tabular-nums",
+                          active ? "font-bold text-foreground" : "text-muted-foreground"
+                        )}
+                      >
+                        {formatMs(sub.start_ms).slice(0, 5)}
+                      </span>
+                      <BlurredSubtitle hidden={subtitlesHidden} compact>
+                        {language !== "zh" && (
+                          <span className={cn("block pr-12 text-sm leading-relaxed", active && "font-bold")}>
+                            {practiceMode === "blank" ? <ClozeText text={sub.en_text} /> : sub.en_text}
+                          </span>
+                        )}
+                        {practiceMode !== "blank" &&
+                          (language === "both" || language === "zh" || subtitlesHidden) &&
+                          sub.zh_text && (
+                          <span className="block text-[13px] font-semibold leading-relaxed text-muted-foreground">
+                            {sub.zh_text}
+                          </span>
+                        )}
+                      </BlurredSubtitle>
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+
+            {autoScroll && scrollPaused && currentIndex >= 0 && (
+              <div className="pointer-events-none sticky bottom-3 flex justify-center">
+                <Button
+                  size="sm"
+                  variant="brand"
+                  className="pointer-events-auto"
+                  onClick={() => {
+                    setScrollPaused(false);
+                    scrollToIndex(currentIndexRef.current);
+                  }}
+                >
+                  <ListRestart className="h-4 w-4" />
+                  回到当前句
+                </Button>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {practiceMode === "intensive" && (
+          <IntensivePanel
+            currentSub={currentSub}
+            subtitles={subtitles}
+            currentIndex={currentIndex}
+            onClose={() => setPracticeMode("off")}
+          />
+        )}
+        {practiceOpen &&
+          typeof document !== "undefined" &&
+          createPortal(
+            <div
+              ref={practicePopupRef}
+              style={{ left: practiceMenuPosition.left, top: practiceMenuPosition.top }}
+              className="fixed z-[9999] w-24 -translate-x-1/2 overflow-hidden rounded-lg border border-[#e8dcff] bg-white py-1.5 text-sm font-black text-foreground opacity-100 shadow-[0_18px_42px_rgba(40,24,88,0.24),0_0_0_1px_rgba(255,255,255,1)]"
+            >
+              {PRACTICE_OPTIONS.map((item) => (
+                <button
+                  type="button"
+                  key={item.value}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    choosePracticeMode(item.value);
+                  }}
+                  className={cn(
+                    "block w-full bg-white px-4 py-2 text-left transition-colors hover:bg-[#f2e9ff]",
+                    practiceMode === item.value && "bg-[#f2e9ff] text-[#8f5cff]"
+                  )}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>,
+            document.body
+          )}
+      </div>
+    </div>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded-md border-2 border-foreground bg-accent px-1.5 py-0.5 font-mono text-[10px] font-bold text-foreground shadow-soft">
+      {children}
+    </kbd>
+  );
+}
+
+const STOP_WORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "because",
+  "before",
+  "could",
+  "from",
+  "have",
+  "there",
+  "these",
+  "they",
+  "this",
+  "that",
+  "with",
+  "would",
+  "your",
+]);
+
+function getClozeParts(text: string | null) {
+  if (!text) return null;
+  const matches = Array.from(text.matchAll(/[A-Za-z][A-Za-z'-]*/g));
+  const target =
+    [...matches]
+      .reverse()
+      .find((match) => match[0].length >= 4 && !STOP_WORDS.has(match[0].toLowerCase())) ??
+    matches[matches.length - 1];
+  if (!target || target.index == null) return null;
+  const start = target.index;
+  const word = target[0];
+  return {
+    before: text.slice(0, start),
+    word,
+    after: text.slice(start + word.length),
+  };
+}
+
+function ClozeText({ text }: { text: string | null }) {
+  const parts = getClozeParts(text);
+  if (!text) return null;
+  if (!parts) return <>{text}</>;
+  return (
+    <>
+      {parts.before}
+      <span className="mx-1 inline-flex min-w-[5.5rem] translate-y-1 items-end justify-center rounded-sm bg-[#f7f0ff] px-3 pt-1 text-transparent shadow-[inset_0_-1px_0_#b995ff]">
+        {parts.word}
+      </span>
+      {parts.after}
+    </>
+  );
+}
+
+function collectFocusWords(subtitles: Subtitle[], currentIndex: number) {
+  const nearby = [currentIndex, currentIndex + 1, currentIndex - 1]
+    .filter((index) => index >= 0 && index < subtitles.length)
+    .map((index) => subtitles[index]);
+  const seen = new Set<string>();
+  const words: { word: string; sentence: string; translation: string | null }[] = [];
+
+  nearby.forEach((sub) => {
+    const sentence = sub.en_text ?? "";
+    const matches = sentence.match(/[A-Za-z][A-Za-z'-]*/g) ?? [];
+    matches.forEach((raw) => {
+      const word = raw.toLowerCase();
+      if (word.length < 5 || STOP_WORDS.has(word) || seen.has(word)) return;
+      seen.add(word);
+      words.push({
+        word,
+        sentence,
+        translation: sub.zh_text,
+      });
+    });
+  });
+
+  return words.slice(0, 8);
+}
+
+function speakText(text: string) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "en-US";
+  utterance.rate = 0.86;
+  window.speechSynthesis.speak(utterance);
+}
+
+function IntensivePanel({
+  currentSub,
+  subtitles,
+  currentIndex,
+  onClose,
+}: {
+  currentSub: Subtitle | null;
+  subtitles: Subtitle[];
+  currentIndex: number;
+  onClose: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState<"words" | "phrases" | "expressions">("words");
+  const [markedWords, setMarkedWords] = useState<Set<string>>(() => new Set());
+  const focusWords = collectFocusWords(subtitles, Math.max(0, currentIndex));
+  const phraseCount = currentSub?.en_text ? Math.max(1, Math.min(6, Math.floor(currentSub.en_text.split(" ").length / 4))) : 0;
+  const phrases = currentSub?.en_text
+    ? currentSub.en_text
+        .split(/,\s*|\.\s*/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 6)
+    : [];
+
+  return (
+    <aside className="surface flex min-h-[50vh] flex-col overflow-hidden rounded-lg bg-white lg:h-[calc(100vh-5.5rem)] lg:min-h-0 lg:rounded-l-none lg:border-l lg:border-l-[#eadfff] lg:shadow-soft">
+      <div className="flex items-center justify-between rounded-tr-lg border-b border-[#efe7ff] bg-white px-4 py-3">
+        <h2 className="flex items-center gap-2 text-base font-black">
+          <span className="h-3 w-3 rounded-sm border border-[#c7a8ff] bg-[#f2e9ff]" />
+          精读卡片
+        </h2>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-full p-1 text-muted-foreground hover:bg-[#f2e9ff] hover:text-[#8f5cff]"
+          title="关闭精读卡片"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="border-b border-[#efe7ff] bg-white px-4 py-3">
+        <div className="grid grid-cols-3 rounded-full bg-[#faf7ff] p-1 text-center text-xs font-black text-muted-foreground">
+          <button
+            type="button"
+            onClick={() => setActiveTab("words")}
+            className={cn("rounded-full px-2 py-1.5", activeTab === "words" && "bg-white text-[#8f5cff] shadow-sm")}
+          >
+            单词 ({focusWords.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("phrases")}
+            className={cn("rounded-full px-2 py-1.5", activeTab === "phrases" && "bg-white text-[#8f5cff] shadow-sm")}
+          >
+            短语 ({phraseCount})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("expressions")}
+            className={cn("rounded-full px-2 py-1.5", activeTab === "expressions" && "bg-white text-[#8f5cff] shadow-sm")}
+          >
+            地道表达 (0)
+          </button>
+        </div>
+      </div>
+
+      <div className="thin-scrollbar flex-1 space-y-3 overflow-y-auto bg-white p-3">
+        {activeTab === "words" && focusWords.length > 0 ? (
+          focusWords.map((item) => (
+            <article key={item.word} className="rounded-xl border border-[#eadfff] bg-white p-4 shadow-soft">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-lg font-black leading-none">{item.word}</h3>
+                  <p className="mt-1 text-xs font-bold text-[#a678ff]">/{item.word}/</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => speakText(item.word)}
+                  className="rounded-lg bg-[#f2e9ff] p-2 text-[#9a63ff] hover:bg-[#eadcff]"
+                  title="点读"
+                >
+                  <Volume2 className="h-4 w-4" />
+                </button>
+              </div>
+              <p className="mt-3 text-sm font-black">n. 重点词</p>
+              <div className="mt-3 rounded-lg bg-[#fbf8ff] px-3 py-2 text-sm leading-6 text-muted-foreground">
+                <p className="italic text-foreground">"{item.sentence}"</p>
+                {item.translation && <p className="mt-1">{item.translation}</p>}
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => speakText(item.sentence)}
+                  className="rounded-lg border border-[#eadfff] py-2 text-xs font-black hover:bg-[#f7f0ff]"
+                >
+                  点读
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMarkedWords((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(item.word)) next.delete(item.word);
+                      else next.add(item.word);
+                      return next;
+                    });
+                  }}
+                  className={cn(
+                    "rounded-lg border border-[#eadfff] py-2 text-xs font-black hover:bg-[#f7f0ff]",
+                    markedWords.has(item.word) && "border-[#b995ff] bg-[#f2e9ff] text-[#8f5cff]"
+                  )}
+                >
+                  {markedWords.has(item.word) ? "已标记" : "标记"}
+                </button>
+              </div>
+            </article>
+          ))
+        ) : activeTab === "phrases" && phrases.length > 0 ? (
+          phrases.map((phrase) => (
+            <article key={phrase} className="rounded-xl border border-[#eadfff] bg-white p-4 shadow-soft">
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-base font-black leading-7">{phrase}</p>
+                <button
+                  type="button"
+                  onClick={() => speakText(phrase)}
+                  className="rounded-lg bg-[#f2e9ff] p-2 text-[#9a63ff] hover:bg-[#eadcff]"
+                  title="点读短语"
+                >
+                  <Volume2 className="h-4 w-4" />
+                </button>
+              </div>
+              {currentSub?.zh_text && <p className="mt-2 text-sm font-semibold leading-6 text-muted-foreground">{currentSub.zh_text}</p>}
+            </article>
+          ))
+        ) : activeTab === "expressions" ? (
+          <div className="rounded-xl border border-dashed border-[#dac8ff] bg-[#fbf8ff] p-6 text-center text-sm font-bold text-muted-foreground">
+            当前句暂未识别到地道表达。
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed border-[#dac8ff] bg-[#fbf8ff] p-6 text-center text-sm font-bold text-muted-foreground">
+            播放到一句字幕后，这里会显示可精读的单词卡片。
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function BlurredSubtitle({
+  hidden,
+  compact,
+  children,
+}: {
+  hidden: boolean;
+  compact?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={cn("relative", hidden && "select-none")}>
+      <div className={cn("transition-all duration-200", hidden && "opacity-65 blur-[5px]")}>
+        {children}
+      </div>
+      {hidden && (
+        <BlindCover
+          className={cn(
+            "absolute inset-[-4px]",
+            compact ? "rounded-md bg-white/86" : "rounded-lg bg-white/88"
+          )}
+        />
+      )}
+    </div>
+  );
+}
+
+function BlindCover({ className }: { className?: string }) {
+  return (
+    <div
+      className={cn(
+        "pointer-events-none rounded-md border-2 border-dashed border-foreground/55 bg-white/88 shadow-soft backdrop-blur-[7px]",
+        className
+      )}
+    />
+  );
+}
+
+function ToolbarButton({
+  children,
+  onClick,
+  title,
+  active,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  title: string;
+  active?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "inline-flex h-8 items-center gap-1 rounded-lg px-2.5 transition-colors hover:bg-[#f2e9ff]",
+        active ? "bg-[#f2e9ff] text-[#8f5cff]" : "text-[#b695ff]"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ControlButton({
+  children,
+  onClick,
+  title,
+  active,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  title: string;
+  active?: boolean;
+}) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "flex h-10 items-center gap-1 rounded-md border-2 border-foreground px-2.5 font-bold shadow-soft transition-all hover:-translate-y-0.5 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none",
+        active ? "bg-brand text-foreground" : "bg-white text-muted-foreground hover:bg-accent hover:text-foreground"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
