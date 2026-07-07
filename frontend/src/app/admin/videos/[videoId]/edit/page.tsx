@@ -27,6 +27,20 @@ import { api, uploadWithProgress } from "@/lib/api";
 import type { ReuploadResult, VideoAdmin, VideoStatus } from "@/lib/types";
 import { formatDuration, formatFileSize } from "@/lib/utils";
 
+function parseTagsInput(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/[,，、\n]/)
+    .map((item) => item.trim().replace(/\s+/g, " "))
+    .filter(Boolean)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 export default function AdminVideoEditPage() {
   const params = useParams<{ videoId: string }>();
   const videoId = Number(params.videoId);
@@ -87,22 +101,25 @@ export default function AdminVideoEditPage() {
 function BasicInfoCard({ video, onSaved }: { video: VideoAdmin; onSaved: () => void }) {
   const [title, setTitle] = useState(video.title);
   const [description, setDescription] = useState(video.description ?? "");
-  const [category, setCategory] = useState(video.category ?? "");
+  const [tagsInput, setTagsInput] = useState((video.tags?.length ? video.tags : video.category ? [video.category] : []).join("，"));
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
     setTitle(video.title);
     setDescription(video.description ?? "");
-    setCategory(video.category ?? "");
+    setTagsInput((video.tags?.length ? video.tags : video.category ? [video.category] : []).join("，"));
   }, [video]);
 
   const mutation = useMutation({
-    mutationFn: () =>
-      api.put(`/api/admin/videos/${video.id}`, {
+    mutationFn: () => {
+      const tags = parseTagsInput(tagsInput);
+      if (tags.length > 4) throw new Error("一个视频最多只能设置 4 个标签。");
+      return api.put(`/api/admin/videos/${video.id}`, {
         title: title.trim(),
         description,
-        category,
-      }),
+        tags,
+      });
+    },
     onSuccess: () => {
       setMessage("已保存");
       onSaved();
@@ -126,8 +143,14 @@ function BasicInfoCard({ video, onSaved }: { video: VideoAdmin; onSaved: () => v
           <Input id="title" value={title} onChange={(e) => setTitle(e.target.value)} required />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="category">分类</Label>
-          <Input id="category" value={category} onChange={(e) => setCategory(e.target.value)} />
+          <Label htmlFor="tags">标签（最多 4 个）</Label>
+          <Input
+            id="tags"
+            value={tagsInput}
+            onChange={(e) => setTagsInput(e.target.value)}
+            placeholder="例如：A1入门，生活vlog，美食"
+          />
+          <p className="text-xs font-semibold text-muted-foreground">用逗号、顿号或换行分隔。</p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="description">简介</Label>

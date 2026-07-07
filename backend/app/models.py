@@ -79,6 +79,54 @@ class Video(Base):
     warnings: Mapped[list["SubtitleWarning"]] = relationship(
         back_populates="video", cascade="all, delete-orphan"
     )
+    tag_links: Mapped[list["VideoTag"]] = relationship(
+        back_populates="video", cascade="all, delete-orphan", order_by="VideoTag.sort_order"
+    )
+
+    @property
+    def tags(self) -> list[str]:
+        return [link.tag.name for link in sorted(self.tag_links, key=lambda link: link.sort_order)]
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_tags_name"),
+        UniqueConstraint("slug", name="uq_tags_slug"),
+        Index("ix_tags_type", "type"),
+        MYSQL_ARGS,
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(50), nullable=False)
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    video_links: Mapped[list["VideoTag"]] = relationship(
+        back_populates="tag", cascade="all, delete-orphan"
+    )
+
+
+class VideoTag(Base):
+    __tablename__ = "video_tags"
+    __table_args__ = (
+        UniqueConstraint("video_id", "tag_id", name="uq_video_tags_video_tag"),
+        Index("ix_video_tags_tag_id", "tag_id"),
+        MYSQL_ARGS,
+    )
+
+    video_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("videos.id", ondelete="CASCADE"), primary_key=True
+    )
+    tag_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    video: Mapped["Video"] = relationship(back_populates="tag_links")
+    tag: Mapped["Tag"] = relationship(back_populates="video_links")
 
 
 class Subtitle(Base):

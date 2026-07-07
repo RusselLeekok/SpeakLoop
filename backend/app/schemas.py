@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 VIDEO_STATUSES = {"draft", "processing", "ready", "published", "unpublished", "failed"}
+MAX_VIDEO_TAGS = 4
 
 
 # ---------- auth ----------
@@ -58,6 +59,7 @@ class VideoPublicOut(BaseModel):
     title: str
     description: str | None
     category: str | None
+    tags: list[str] = Field(default_factory=list)
     cover_url: str | None
     duration: float | None
     subtitle_count: int
@@ -75,6 +77,7 @@ class VideoAdminOut(BaseModel):
     title: str
     description: str | None
     category: str | None
+    tags: list[str] = Field(default_factory=list)
     original_filename: str | None
     file_url: str
     cover_url: str | None
@@ -99,6 +102,7 @@ class VideoUpdateIn(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     category: str | None = Field(default=None, max_length=100)
+    tags: list[str] | None = Field(default=None, max_length=MAX_VIDEO_TAGS)
     status: str | None = None
 
 

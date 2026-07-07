@@ -77,13 +77,27 @@ function readFirstFrameCover(file: File): Promise<Blob | null> {
   });
 }
 
+function parseTagsInput(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/[,，、\n]/)
+    .map((item) => item.trim().replace(/\s+/g, " "))
+    .filter(Boolean)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 export default function AdminVideoNewPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [category, setCategory] = useState("");
+  const [tagsInput, setTagsInput] = useState("");
   const [publishNow, setPublishNow] = useState(false);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [enFile, setEnFile] = useState<File | null>(null);
@@ -134,6 +148,11 @@ export default function AdminVideoNewPage() {
       setError("请选择英文字幕文件（.vtt / .srt）。");
       return;
     }
+    const tags = parseTagsInput(tagsInput);
+    if (tags.length > 4) {
+      setError("一个视频最多只能设置 4 个标签。");
+      return;
+    }
 
     setUploading(true);
     setProgress(0);
@@ -142,7 +161,7 @@ export default function AdminVideoNewPage() {
       const fd = new FormData();
       fd.set("title", title.trim());
       if (description.trim()) fd.set("description", description.trim());
-      if (category.trim()) fd.set("category", category.trim());
+      if (tags.length > 0) fd.set("tags", JSON.stringify(tags));
       fd.set("publish_now", String(publishNow));
       if (duration != null) fd.set("duration", String(duration));
       fd.set("video_file", videoFile);
@@ -195,14 +214,17 @@ export default function AdminVideoNewPage() {
 
             <div className="grid gap-5 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="category">分类</Label>
+                <Label htmlFor="tags">标签（最多 4 个）</Label>
                 <Input
-                  id="category"
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  placeholder="例如：基础口语 / TED / 电影精选"
-                  maxLength={100}
+                  id="tags"
+                  value={tagsInput}
+                  onChange={(e) => setTagsInput(e.target.value)}
+                  placeholder="例如：A1入门，生活vlog，美食"
+                  maxLength={220}
                 />
+                <p className="text-xs font-semibold text-muted-foreground">
+                  用逗号、顿号或换行分隔。
+                </p>
               </div>
               <div className="flex items-end pb-1.5">
                 <label className="flex cursor-pointer items-center gap-2 text-sm font-bold">

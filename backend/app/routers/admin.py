@@ -1,15 +1,19 @@
 from datetime import datetime
+import hashlib
+import json
 from pathlib import Path
+import re
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from .. import storage
 from ..database import get_db
 from ..deps import require_admin
-from ..models import Subtitle, SubtitleSource, SubtitleWarning, User, Video
+from ..models import Subtitle, SubtitleSource, SubtitleWarning, Tag, User, Video, VideoTag
 from ..schemas import (
+    MAX_VIDEO_TAGS,
     VIDEO_STATUSES,
     AdminStatsOut,
     AdminSubtitlesOut,
@@ -24,6 +28,70 @@ from ..schemas import (
 from ..subtitle_parser import Cue, SubtitleParseError, merge_zh_into_en, parse_subtitle
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+
+
+def _normalize_tags(values: list[str] | None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        name = re.sub(r"\s+", " ", raw.strip())
+        if not name:
+            continue
+        if len(name) > 50:
+            raise HTTPException(status_code=400, detail="单个标签最多 50 个字符")
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    if len(result) > MAX_VIDEO_TAGS:
+        raise HTTPException(status_code=400, detail=f"一个视频最多只能设置 {MAX_VIDEO_TAGS} 个标签")
+    return result
+
+
+def _parse_form_tags(tags: str | None, category: str | None = None) -> list[str]:
+    values: list[str] = []
+    if tags:
+        try:
+            decoded = json.loads(tags)
+            if isinstance(decoded, list):
+                values.extend(str(item) for item in decoded)
+            else:
+                values.append(str(decoded))
+        except json.JSONDecodeError:
+            values.extend(part for part in re.split(r"[,，\n]", tags))
+    if not values and category:
+        values.append(category)
+    return _normalize_tags(values)
+
+
+def _slug_for_tag(name: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if not base:
+        base = "tag"
+    suffix = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    return f"{base[:64]}-{suffix}"
+
+
+def _get_or_create_tag(db: Session, name: str) -> Tag:
+    tag = db.scalar(select(Tag).where(func.lower(Tag.name) == name.lower()))
+    if tag:
+        return tag
+    tag = Tag(name=name, slug=_slug_for_tag(name))
+    db.add(tag)
+    db.flush()
+    return tag
+
+
+def _set_video_tags(db: Session, video: Video, tag_names: list[str]) -> None:
+    normalized = _normalize_tags(tag_names)
+    for link in list(video.tag_links):
+        db.delete(link)
+    db.flush()
+    for order, name in enumerate(normalized):
+        tag = _get_or_create_tag(db, name)
+        db.add(VideoTag(video_id=video.id, tag_id=tag.id, sort_order=order))
+    video.category = normalized[0] if normalized else None
 
 
 def _get_video_or_404(db: Session, video_id: int) -> Video:
@@ -127,7 +195,12 @@ def _parse_pair(
 def stats(db: Session = Depends(get_db)):
     rows = db.execute(select(Video.status, func.count()).group_by(Video.status)).all()
     counts = {status: count for status, count in rows}
-    recent = db.scalars(select(Video).order_by(Video.created_at.desc()).limit(5)).all()
+    recent = db.scalars(
+        select(Video)
+        .options(selectinload(Video.tag_links).selectinload(VideoTag.tag))
+        .order_by(Video.created_at.desc())
+        .limit(5)
+    ).all()
     return AdminStatsOut(
         total=sum(counts.values()),
         published=counts.get("published", 0),
@@ -150,7 +223,7 @@ def list_videos(
     page_size: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    query = select(Video)
+    query = select(Video).options(selectinload(Video.tag_links).selectinload(VideoTag.tag))
     if keyword:
         like = f"%{keyword}%"
         query = query.where(Video.title.like(like) | Video.description.like(like))
@@ -159,7 +232,12 @@ def list_videos(
             raise HTTPException(status_code=400, detail=f"未知状态：{status}")
         query = query.where(Video.status == status)
     if category:
-        query = query.where(Video.category == category)
+        query = (
+            query.outerjoin(VideoTag, VideoTag.video_id == Video.id)
+            .outerjoin(Tag, Tag.id == VideoTag.tag_id)
+            .where(or_(Video.category == category, Tag.name == category))
+            .distinct()
+        )
 
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     videos = db.scalars(
@@ -175,7 +253,14 @@ def list_videos(
 
 @router.get("/videos/{video_id}", response_model=VideoAdminOut)
 def get_video(video_id: int, db: Session = Depends(get_db)):
-    return _get_video_or_404(db, video_id)
+    video = db.scalar(
+        select(Video)
+        .options(selectinload(Video.tag_links).selectinload(VideoTag.tag))
+        .where(Video.id == video_id)
+    )
+    if video is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    return video
 
 
 # ---------- 新增视频（multipart 上传） ----------
@@ -185,6 +270,7 @@ def create_video(
     title: str = Form(...),
     description: str | None = Form(default=None),
     category: str | None = Form(default=None),
+    tags: str | None = Form(default=None),
     publish_now: bool = Form(default=False),
     duration: float | None = Form(default=None),
     video_file: UploadFile = ...,
@@ -197,6 +283,7 @@ def create_video(
     title = title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="视频标题不能为空")
+    tag_names = _parse_form_tags(tags, category)
 
     video_ext = storage.validate_ext(video_file, storage.VIDEO_EXTS, "视频")
     storage.validate_ext(en_subtitle_file, storage.SUBTITLE_EXTS, "英文字幕")
@@ -230,7 +317,7 @@ def create_video(
         video = Video(
             title=title,
             description=description,
-            category=(category or "").strip() or None,
+            category=tag_names[0] if tag_names else ((category or "").strip() or None),
             original_filename=video_file.filename,
             file_path=str(video_path),
             file_url=storage.public_url(video_path),
@@ -244,6 +331,7 @@ def create_video(
         )
         db.add(video)
         db.flush()  # 拿到 video.id
+        _set_video_tags(db, video, tag_names)
 
         try:
             en_cues, zh_texts, warnings = _parse_pair(
@@ -299,7 +387,9 @@ def update_video(video_id: int, body: VideoUpdateIn, db: Session = Depends(get_d
         video.title = body.title.strip()
     if body.description is not None:
         video.description = body.description
-    if body.category is not None:
+    if body.tags is not None:
+        _set_video_tags(db, video, body.tags)
+    elif body.category is not None:
         video.category = body.category.strip() or None
     if body.status is not None:
         _change_status(video, body.status)

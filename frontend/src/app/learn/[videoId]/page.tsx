@@ -57,6 +57,20 @@ const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 type SubtitleLanguage = "both" | "zh" | "en";
 type PracticeMode = "off" | "blind" | "blank" | "repeat" | "intensive";
+type StudyItemKind = "word" | "phrase";
+type StudyStatus = "unknown" | "known";
+
+type StudyItem = {
+  id: string;
+  kind: StudyItemKind;
+  term: string;
+  subtitleIndex: number;
+  sentence: string;
+  translation: string | null;
+  meaning: string;
+  hint: string;
+  pronunciation: string;
+};
 
 const LANGUAGE_OPTIONS: { value: SubtitleLanguage; label: string }[] = [
   { value: "both", label: "双语" },
@@ -138,7 +152,7 @@ function Player({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const itemRefs = useRef(new Map<number, HTMLButtonElement>());
+  const itemRefs = useRef(new Map<number, HTMLElement>());
 
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [playing, setPlaying] = useState(false);
@@ -148,6 +162,9 @@ function Player({
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("off");
   const [practiceOpen, setPracticeOpen] = useState(false);
   const [practiceMenuPosition, setPracticeMenuPosition] = useState({ left: 0, top: 0 });
+  const [activeStudyItem, setActiveStudyItem] = useState<StudyItem | null>(null);
+  const [studyPopupPosition, setStudyPopupPosition] = useState({ left: 0, top: 0 });
+  const [studyStatuses, setStudyStatuses] = useState<Record<string, StudyStatus>>({});
   const [looping, setLooping] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [scrollPaused, setScrollPaused] = useState(false);
@@ -167,6 +184,16 @@ function Player({
   scrollPausedRef.current = scrollPaused;
 
   const hasZh = useMemo(() => subtitles.some((s) => s.zh_text), [subtitles]);
+  const studyItems = useMemo(() => collectStudyItems(subtitles), [subtitles]);
+  const studyItemsBySubtitle = useMemo(() => {
+    const map = new Map<number, StudyItem[]>();
+    studyItems.forEach((item) => {
+      const list = map.get(item.subtitleIndex) ?? [];
+      list.push(item);
+      map.set(item.subtitleIndex, list);
+    });
+    return map;
+  }, [studyItems]);
 
   const cycleLanguage = useCallback(() => {
     setLanguage((prev) => {
@@ -277,6 +304,39 @@ function Player({
     },
     [subtitles]
   );
+
+  const jumpToStudyItem = useCallback(
+    (item: StudyItem, opts: { play?: boolean } = { play: true }) => {
+      seekToSubtitle(item.subtitleIndex, opts);
+      currentIndexRef.current = item.subtitleIndex;
+      setCurrentIndex(item.subtitleIndex);
+      setScrollPaused(false);
+      scrollToIndex(item.subtitleIndex);
+    },
+    [seekToSubtitle, scrollToIndex]
+  );
+
+  const openStudyItem = useCallback((item: StudyItem, event: React.MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 280;
+    setStudyPopupPosition({
+      left: Math.min(Math.max(rect.left + rect.width / 2, width / 2 + 12), window.innerWidth - width / 2 - 12),
+      top: Math.min(rect.bottom + 10, window.innerHeight - 220),
+    });
+    setActiveStudyItem(item);
+  }, []);
+
+  const cycleStudyStatus = useCallback((itemId: string) => {
+    setStudyStatuses((prev) => {
+      const next = { ...prev };
+      if (!next[itemId]) next[itemId] = "unknown";
+      else if (next[itemId] === "unknown") next[itemId] = "known";
+      else delete next[itemId];
+      return next;
+    });
+  }, []);
 
   const goPrev = useCallback(() => {
     const el = videoRef.current;
@@ -414,6 +474,17 @@ function Player({
     };
   }, [practiceOpen, positionPracticeMenu]);
 
+  useEffect(() => {
+    if (!activeStudyItem) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest("[data-study-popover]") || target?.closest("[data-study-term]")) return;
+      setActiveStudyItem(null);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [activeStudyItem]);
+
   const currentSub = currentIndex >= 0 ? subtitles[currentIndex] : null;
   const showEn = language === "both" || language === "en";
   const showZh = language === "both" || language === "zh";
@@ -422,7 +493,7 @@ function Player({
 
   return (
     <div className="flex min-h-screen flex-col bg-aurora text-foreground">
-      <header className="flex h-16 shrink-0 items-center gap-3 border-b-2 border-foreground bg-white/95 px-4 shadow-soft lg:px-6">
+      <header className="flex h-14 shrink-0 items-center gap-3 border-b-2 border-foreground bg-white/95 px-4 shadow-soft lg:px-5">
         <Button variant="ghost" size="icon" asChild>
           <Link href={`/videos/${video.id}`} aria-label="返回素材详情">
             <ArrowLeft />
@@ -441,13 +512,13 @@ function Player({
 
       <div
         className={cn(
-          "mx-auto grid h-[calc(100vh-4rem)] min-h-0 w-full max-w-[calc(100vw-12px)] flex-1 overflow-hidden p-2 lg:p-3",
+          "mx-auto grid h-[calc(100vh-3.5rem)] min-h-0 w-full max-w-[calc(100vw-8px)] flex-1 overflow-hidden p-1.5 lg:p-2",
           practiceMode === "intensive"
-            ? "gap-y-4 lg:max-w-[1680px] lg:grid-cols-[minmax(0,1fr)_330px_330px] lg:gap-x-0"
-            : "gap-4 lg:grid-cols-[minmax(0,1fr)_380px] xl:max-w-[1500px]"
+            ? "gap-y-3 lg:max-w-[1780px] lg:grid-cols-[minmax(0,1fr)_300px_300px] lg:gap-x-0"
+            : "gap-3 lg:grid-cols-[minmax(0,1fr)_340px] xl:max-w-[1680px]"
         )}
       >
-        <div className="flex min-h-0 min-w-0 flex-col gap-3 lg:h-[calc(100vh-5.5rem)]">
+        <div className="flex min-h-0 min-w-0 flex-col gap-2.5 lg:h-[calc(100vh-4.5rem)]">
           <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border-2 border-foreground bg-[#f4efe3] shadow-elevated">
             <video
               ref={videoRef}
@@ -489,7 +560,7 @@ function Player({
             )}
           </div>
 
-          <div className="surface relative flex h-32 shrink-0 flex-col items-center justify-center gap-2 overflow-hidden rounded-lg px-6 py-4 text-center">
+          <div className="surface relative flex h-28 shrink-0 flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg px-6 py-3 text-center">
             {currentSub ? (
               <div
                 key={currentSub.id}
@@ -503,7 +574,12 @@ function Player({
                     {practiceMode === "blank" ? (
                       <ClozeText text={currentSub.en_text} />
                     ) : (
-                      currentSub.en_text
+                      <HighlightedSubtitleText
+                        text={currentSub.en_text}
+                        items={studyItemsBySubtitle.get(currentIndex) ?? []}
+                        statuses={studyStatuses}
+                        onTermClick={openStudyItem}
+                      />
                     )}
                   </p>
                 )}
@@ -529,8 +605,8 @@ function Player({
             {subtitlesHidden && <BlindCover className="absolute inset-2 z-20" />}
           </div>
 
-          <div className="surface shrink-0 rounded-lg px-4 py-3">
-            <div className="mb-4 flex items-center gap-3">
+          <div className="surface shrink-0 rounded-lg px-4 py-2.5">
+            <div className="mb-3 flex items-center gap-3">
               <span className="w-12 text-right font-mono text-xs font-bold tabular-nums text-muted-foreground">
                 {timeText}
               </span>
@@ -561,7 +637,7 @@ function Player({
               <button
                 title="播放 / 暂停"
                 onClick={togglePlay}
-                className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-foreground bg-brand text-foreground shadow-soft transition-transform hover:-translate-y-0.5 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
+                className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-foreground bg-brand text-foreground shadow-soft transition-transform hover:-translate-y-0.5 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
               >
                 {playing ? <Pause className="h-5 w-5" /> : <Play className="ml-0.5 h-5 w-5" />}
               </button>
@@ -594,7 +670,7 @@ function Player({
 
         <aside
           className={cn(
-            "surface flex min-h-[50vh] flex-col overflow-visible rounded-lg lg:h-[calc(100vh-5.5rem)] lg:min-h-0",
+            "surface flex min-h-[50vh] flex-col overflow-visible rounded-lg lg:h-[calc(100vh-4.5rem)] lg:min-h-0",
             practiceMode === "intensive" && "lg:rounded-r-none lg:border-r-0"
           )}
         >
@@ -641,14 +717,16 @@ function Player({
 
           <div
             ref={listRef}
-            className="thin-scrollbar fade-mask-y relative z-0 flex-1 overflow-y-auto scroll-smooth rounded-b-lg bg-white lg:max-h-[calc(100vh-10.5rem)]"
+            className="thin-scrollbar fade-mask-y relative z-0 flex-1 overflow-y-auto scroll-smooth rounded-b-lg bg-white lg:max-h-[calc(100vh-9.5rem)]"
           >
             <ol className="relative divide-y-2 divide-foreground/15 py-2">
               {subtitles.map((sub, i) => {
                 const active = i === currentIndex;
                 return (
                   <li key={sub.id}>
-                    <button
+                    <div
+                      role="button"
+                      tabIndex={0}
                       ref={(el) => {
                         if (el) itemRefs.current.set(sub.id, el);
                         else itemRefs.current.delete(sub.id);
@@ -657,7 +735,15 @@ function Player({
                         seekToSubtitle(i, { play: true });
                         setScrollPaused(false);
                       }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          seekToSubtitle(i, { play: true });
+                          setScrollPaused(false);
+                        }
+                      }}
                       className={cn(
+                        "cursor-pointer",
                         "relative block w-full border-l-4 px-4 py-3 text-left transition-colors",
                         active
                           ? "border-l-foreground bg-accent/70 text-foreground"
@@ -680,7 +766,16 @@ function Player({
                       <BlurredSubtitle hidden={subtitlesHidden} compact>
                         {language !== "zh" && (
                           <span className={cn("block pr-12 text-sm leading-relaxed", active && "font-bold")}>
-                            {practiceMode === "blank" ? <ClozeText text={sub.en_text} /> : sub.en_text}
+                            {practiceMode === "blank" ? (
+                              <ClozeText text={sub.en_text} />
+                            ) : (
+                              <HighlightedSubtitleText
+                                text={sub.en_text}
+                                items={studyItemsBySubtitle.get(i) ?? []}
+                                statuses={studyStatuses}
+                                onTermClick={openStudyItem}
+                              />
+                            )}
                           </span>
                         )}
                         {practiceMode !== "blank" &&
@@ -691,7 +786,7 @@ function Player({
                           </span>
                         )}
                       </BlurredSubtitle>
-                    </button>
+                    </div>
                   </li>
                 );
               })}
@@ -721,9 +816,27 @@ function Player({
             currentSub={currentSub}
             subtitles={subtitles}
             currentIndex={currentIndex}
+            studyItems={studyItems}
+            statuses={studyStatuses}
+            onReadItem={jumpToStudyItem}
+            onCycleStatus={cycleStudyStatus}
             onClose={() => setPracticeMode("off")}
           />
         )}
+        {activeStudyItem &&
+          typeof document !== "undefined" &&
+          createPortal(
+            <StudyTermPopover
+              item={activeStudyItem}
+              status={studyStatuses[activeStudyItem.id]}
+              position={studyPopupPosition}
+              onClose={() => setActiveStudyItem(null)}
+              onSpeak={() => speakText(activeStudyItem.term)}
+              onRead={() => jumpToStudyItem(activeStudyItem, { play: true })}
+              onCycleStatus={() => cycleStudyStatus(activeStudyItem.id)}
+            />,
+            document.body
+          )}
         {practiceOpen &&
           typeof document !== "undefined" &&
           createPortal(
@@ -782,7 +895,53 @@ const STOP_WORDS = new Set([
   "with",
   "would",
   "your",
+  "will",
+  "well",
+  "into",
+  "only",
+  "some",
+  "when",
+  "then",
+  "them",
+  "than",
+  "what",
+  "were",
+  "been",
 ]);
+
+const COMMON_MEANINGS: Record<string, string> = {
+  leader: "n. 领导者；负责人",
+  company: "n. 公司；企业",
+  communicate: "v. 沟通；表达",
+  mission: "n. 使命；任务",
+  vision: "n. 愿景；视野",
+  values: "n. 价值观",
+  employees: "n. 员工",
+  direction: "n. 方向；指引",
+  humility: "n. 谦逊；谦卑",
+  translated: "v. 翻译；转化",
+  legendary: "adj. 传奇的",
+  chairman: "n. 主席；董事长",
+  memoir: "n. 回忆录",
+  management: "n. 管理",
+  success: "n. 成功",
+  complex: "adj. 复杂的",
+  challenging: "adj. 有挑战的",
+  frustration: "n. 挫败；沮丧",
+  optimistic: "adj. 乐观的",
+};
+
+function normalizeTerm(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function makeStudyId(kind: StudyItemKind, term: string, subtitleIndex: number) {
+  return `${kind}-${subtitleIndex}-${normalizeTerm(term).replace(/\s+/g, "-")}`;
+}
 
 function getClozeParts(text: string | null) {
   if (!text) return null;
@@ -817,29 +976,147 @@ function ClozeText({ text }: { text: string | null }) {
   );
 }
 
-function collectFocusWords(subtitles: Subtitle[], currentIndex: number) {
-  const nearby = [currentIndex, currentIndex + 1, currentIndex - 1]
-    .filter((index) => index >= 0 && index < subtitles.length)
-    .map((index) => subtitles[index]);
+function collectStudyItems(subtitles: Subtitle[]) {
   const seen = new Set<string>();
-  const words: { word: string; sentence: string; translation: string | null }[] = [];
+  const items: StudyItem[] = [];
 
-  nearby.forEach((sub) => {
+  subtitles.forEach((sub, subtitleIndex) => {
     const sentence = sub.en_text ?? "";
-    const matches = sentence.match(/[A-Za-z][A-Za-z'-]*/g) ?? [];
-    matches.forEach((raw) => {
-      const word = raw.toLowerCase();
-      if (word.length < 5 || STOP_WORDS.has(word) || seen.has(word)) return;
-      seen.add(word);
-      words.push({
-        word,
+    const words = sentence.match(/[A-Za-z][A-Za-z'-]*/g) ?? [];
+    const word = [...words]
+      .map((raw) => raw.toLowerCase())
+      .filter((raw) => raw.length >= 6 && !STOP_WORDS.has(raw))
+      .sort((a, b) => b.length - a.length)[0];
+
+    if (word && !seen.has(`word:${word}`)) {
+      seen.add(`word:${word}`);
+      items.push({
+        id: makeStudyId("word", word, subtitleIndex),
+        kind: "word",
+        term: word,
+        subtitleIndex,
         sentence,
         translation: sub.zh_text,
+        meaning: COMMON_MEANINGS[word] ?? "重点词；建议反复听辨",
+        hint: "在原句中听到这个词时，注意重音和连读。",
+        pronunciation: `/${word}/`,
       });
-    });
+    }
+
+    const phrase = pickPhrase(sentence);
+    const normalizedPhrase = phrase ? normalizeTerm(phrase) : "";
+    if (phrase && normalizedPhrase && !seen.has(`phrase:${normalizedPhrase}`)) {
+      seen.add(`phrase:${normalizedPhrase}`);
+      items.push({
+        id: makeStudyId("phrase", phrase, subtitleIndex),
+        kind: "phrase",
+        term: phrase,
+        subtitleIndex,
+        sentence,
+        translation: sub.zh_text,
+        meaning: "phr. 重点短语；按整块表达记忆",
+        hint: "不要逐词翻译，跟着整句节奏读出来。",
+        pronunciation: `/${phrase.toLowerCase()}/`,
+      });
+    }
   });
 
-  return words.slice(0, 8);
+  const words = items.filter((item) => item.kind === "word").slice(0, 18);
+  const phrases = items.filter((item) => item.kind === "phrase").slice(0, 18);
+  return [...words, ...phrases].sort((a, b) => a.subtitleIndex - b.subtitleIndex || a.term.length - b.term.length);
+}
+
+function pickPhrase(sentence: string) {
+  const tokens = Array.from(sentence.matchAll(/[A-Za-z][A-Za-z'-]*/g)).map((match) => match[0]);
+  const candidates: { phrase: string; score: number }[] = [];
+
+  for (let size = 2; size <= 4; size += 1) {
+    for (let index = 0; index <= tokens.length - size; index += 1) {
+      const slice = tokens.slice(index, index + size);
+      const normalized = slice.map((word) => word.toLowerCase());
+      const content = normalized.filter((word) => word.length >= 4 && !STOP_WORDS.has(word));
+      if (content.length < 2) continue;
+      const phrase = slice.join(" ");
+      if (phrase.length < 8 || phrase.length > 46) continue;
+      const score = content.length * 8 + Math.min(phrase.length, 32) - normalized.filter((word) => STOP_WORDS.has(word)).length * 3;
+      candidates.push({ phrase, score });
+    }
+  }
+
+  return candidates.sort((a, b) => b.score - a.score)[0]?.phrase ?? null;
+}
+
+function splitTextByStudyItems(text: string, items: StudyItem[]) {
+  if (!items.length) return [{ text, item: null as StudyItem | null }];
+  const matches: { start: number; end: number; item: StudyItem }[] = [];
+
+  items
+    .slice()
+    .sort((a, b) => b.term.length - a.term.length)
+    .forEach((item) => {
+      const source = escapeRegExp(item.term).replace(/\s+/g, "\\s+");
+      const regex = new RegExp(`\\b${source}\\b`, "gi");
+      let match: RegExpExecArray | null;
+      while ((match = regex.exec(text))) {
+        matches.push({ start: match.index, end: match.index + match[0].length, item });
+      }
+    });
+
+  const accepted: { start: number; end: number; item: StudyItem }[] = [];
+  matches
+    .sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start))
+    .forEach((match) => {
+      if (accepted.some((item) => match.start < item.end && match.end > item.start)) return;
+      accepted.push(match);
+    });
+
+  if (!accepted.length) return [{ text, item: null as StudyItem | null }];
+  const parts: { text: string; item: StudyItem | null }[] = [];
+  let cursor = 0;
+  accepted.forEach((match) => {
+    if (match.start > cursor) parts.push({ text: text.slice(cursor, match.start), item: null });
+    parts.push({ text: text.slice(match.start, match.end), item: match.item });
+    cursor = match.end;
+  });
+  if (cursor < text.length) parts.push({ text: text.slice(cursor), item: null });
+  return parts;
+}
+
+function HighlightedSubtitleText({
+  text,
+  items,
+  statuses,
+  onTermClick,
+}: {
+  text: string | null;
+  items: StudyItem[];
+  statuses: Record<string, StudyStatus>;
+  onTermClick: (item: StudyItem, event: React.MouseEvent<HTMLElement>) => void;
+}) {
+  if (!text) return null;
+  return (
+    <>
+      {splitTextByStudyItems(text, items).map((part, index) =>
+        part.item ? (
+          <button
+            key={`${part.item.id}-${index}`}
+            type="button"
+            data-study-term
+            onClick={(event) => onTermClick(part.item!, event)}
+            className={cn(
+              "inline rounded-sm border-b-2 border-[#16a34a] pb-0.5 text-left font-semibold transition-colors hover:bg-[#e8f3ea] focus:outline-none focus:ring-2 focus:ring-[#88c79d]",
+              statuses[part.item.id] === "unknown" && "border-[#e85a7a] bg-[#fff0f5]",
+              statuses[part.item.id] === "known" && "border-[#8f5cff] bg-[#f5efff]"
+            )}
+          >
+            {part.text}
+          </button>
+        ) : (
+          <span key={`plain-${index}`}>{part.text}</span>
+        )
+      )}
+    </>
+  );
 }
 
 function speakText(text: string) {
@@ -855,27 +1132,45 @@ function IntensivePanel({
   currentSub,
   subtitles,
   currentIndex,
+  studyItems,
+  statuses,
+  onReadItem,
+  onCycleStatus,
   onClose,
 }: {
   currentSub: Subtitle | null;
   subtitles: Subtitle[];
   currentIndex: number;
+  studyItems: StudyItem[];
+  statuses: Record<string, StudyStatus>;
+  onReadItem: (item: StudyItem) => void;
+  onCycleStatus: (itemId: string) => void;
   onClose: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<"words" | "phrases" | "expressions">("words");
-  const [markedWords, setMarkedWords] = useState<Set<string>>(() => new Set());
-  const focusWords = collectFocusWords(subtitles, Math.max(0, currentIndex));
-  const phraseCount = currentSub?.en_text ? Math.max(1, Math.min(6, Math.floor(currentSub.en_text.split(" ").length / 4))) : 0;
-  const phrases = currentSub?.en_text
-    ? currentSub.en_text
-        .split(/,\s*|\.\s*/)
-        .map((item) => item.trim())
-        .filter(Boolean)
-        .slice(0, 6)
-    : [];
+  const [filter, setFilter] = useState<"all" | "unmarked" | "unknown" | "known">("all");
+  const words = studyItems.filter((item) => item.kind === "word");
+  const phrases = studyItems.filter((item) => item.kind === "phrase");
+  const tabItems = activeTab === "words" ? words : activeTab === "phrases" ? phrases : [];
+  const sortedItems = tabItems
+    .slice()
+    .sort((a, b) => Math.abs(a.subtitleIndex - Math.max(0, currentIndex)) - Math.abs(b.subtitleIndex - Math.max(0, currentIndex)));
+  const filteredItems = sortedItems.filter((item) => {
+    const status = statuses[item.id];
+    if (filter === "unmarked") return !status;
+    if (filter === "unknown") return status === "unknown";
+    if (filter === "known") return status === "known";
+    return true;
+  });
+  const filters: { value: typeof filter; label: string; count: number }[] = [
+    { value: "all", label: "全部", count: tabItems.length },
+    { value: "unmarked", label: "未标记", count: tabItems.filter((item) => !statuses[item.id]).length },
+    { value: "unknown", label: "不认识", count: tabItems.filter((item) => statuses[item.id] === "unknown").length },
+    { value: "known", label: "认识", count: tabItems.filter((item) => statuses[item.id] === "known").length },
+  ];
 
   return (
-    <aside className="surface flex min-h-[50vh] flex-col overflow-hidden rounded-lg bg-white lg:h-[calc(100vh-5.5rem)] lg:min-h-0 lg:rounded-l-none lg:border-l lg:border-l-[#eadfff] lg:shadow-soft">
+    <aside className="surface flex min-h-[50vh] flex-col overflow-hidden rounded-lg bg-white lg:h-[calc(100vh-4.5rem)] lg:min-h-0 lg:rounded-l-none lg:border-l lg:border-l-[#eadfff] lg:shadow-soft">
       <div className="flex items-center justify-between rounded-tr-lg border-b border-[#efe7ff] bg-white px-4 py-3">
         <h2 className="flex items-center gap-2 text-base font-black">
           <span className="h-3 w-3 rounded-sm border border-[#c7a8ff] bg-[#f2e9ff]" />
@@ -898,14 +1193,14 @@ function IntensivePanel({
             onClick={() => setActiveTab("words")}
             className={cn("rounded-full px-2 py-1.5", activeTab === "words" && "bg-white text-[#8f5cff] shadow-sm")}
           >
-            单词 ({focusWords.length})
+            单词 ({words.length})
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("phrases")}
             className={cn("rounded-full px-2 py-1.5", activeTab === "phrases" && "bg-white text-[#8f5cff] shadow-sm")}
           >
-            短语 ({phraseCount})
+            短语 ({phrases.length})
           </button>
           <button
             type="button"
@@ -915,75 +1210,34 @@ function IntensivePanel({
             地道表达 (0)
           </button>
         </div>
+        <div className="mt-3 flex flex-wrap gap-1.5 text-[11px] font-black">
+          {filters.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              onClick={() => setFilter(item.value)}
+              className={cn(
+                "rounded-full border border-[#eadfff] px-2.5 py-1 text-[#8f5cff] transition-colors hover:bg-[#f7f0ff]",
+                filter === item.value && "border-[#b995ff] bg-[#b995ff] text-white"
+              )}
+            >
+              {item.label} ({item.count})
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="thin-scrollbar flex-1 space-y-3 overflow-y-auto bg-white p-3">
-        {activeTab === "words" && focusWords.length > 0 ? (
-          focusWords.map((item) => (
-            <article key={item.word} className="rounded-xl border border-[#eadfff] bg-white p-4 shadow-soft">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-lg font-black leading-none">{item.word}</h3>
-                  <p className="mt-1 text-xs font-bold text-[#a678ff]">/{item.word}/</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => speakText(item.word)}
-                  className="rounded-lg bg-[#f2e9ff] p-2 text-[#9a63ff] hover:bg-[#eadcff]"
-                  title="点读"
-                >
-                  <Volume2 className="h-4 w-4" />
-                </button>
-              </div>
-              <p className="mt-3 text-sm font-black">n. 重点词</p>
-              <div className="mt-3 rounded-lg bg-[#fbf8ff] px-3 py-2 text-sm leading-6 text-muted-foreground">
-                <p className="italic text-foreground">"{item.sentence}"</p>
-                {item.translation && <p className="mt-1">{item.translation}</p>}
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => speakText(item.sentence)}
-                  className="rounded-lg border border-[#eadfff] py-2 text-xs font-black hover:bg-[#f7f0ff]"
-                >
-                  点读
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMarkedWords((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(item.word)) next.delete(item.word);
-                      else next.add(item.word);
-                      return next;
-                    });
-                  }}
-                  className={cn(
-                    "rounded-lg border border-[#eadfff] py-2 text-xs font-black hover:bg-[#f7f0ff]",
-                    markedWords.has(item.word) && "border-[#b995ff] bg-[#f2e9ff] text-[#8f5cff]"
-                  )}
-                >
-                  {markedWords.has(item.word) ? "已标记" : "标记"}
-                </button>
-              </div>
-            </article>
-          ))
-        ) : activeTab === "phrases" && phrases.length > 0 ? (
-          phrases.map((phrase) => (
-            <article key={phrase} className="rounded-xl border border-[#eadfff] bg-white p-4 shadow-soft">
-              <div className="flex items-start justify-between gap-3">
-                <p className="text-base font-black leading-7">{phrase}</p>
-                <button
-                  type="button"
-                  onClick={() => speakText(phrase)}
-                  className="rounded-lg bg-[#f2e9ff] p-2 text-[#9a63ff] hover:bg-[#eadcff]"
-                  title="点读短语"
-                >
-                  <Volume2 className="h-4 w-4" />
-                </button>
-              </div>
-              {currentSub?.zh_text && <p className="mt-2 text-sm font-semibold leading-6 text-muted-foreground">{currentSub.zh_text}</p>}
-            </article>
+        {(activeTab === "words" || activeTab === "phrases") && filteredItems.length > 0 ? (
+          filteredItems.map((item) => (
+            <StudyCard
+              key={item.id}
+              item={item}
+              status={statuses[item.id]}
+              onRead={() => onReadItem(item)}
+              onSpeak={() => speakText(item.term)}
+              onCycleStatus={() => onCycleStatus(item.id)}
+            />
           ))
         ) : activeTab === "expressions" ? (
           <div className="rounded-xl border border-dashed border-[#dac8ff] bg-[#fbf8ff] p-6 text-center text-sm font-bold text-muted-foreground">
@@ -991,11 +1245,151 @@ function IntensivePanel({
           </div>
         ) : (
           <div className="rounded-xl border border-dashed border-[#dac8ff] bg-[#fbf8ff] p-6 text-center text-sm font-bold text-muted-foreground">
-            播放到一句字幕后，这里会显示可精读的单词卡片。
+            当前筛选下没有卡片。
           </div>
         )}
       </div>
     </aside>
+  );
+}
+
+function StudyCard({
+  item,
+  status,
+  onRead,
+  onSpeak,
+  onCycleStatus,
+}: {
+  item: StudyItem;
+  status?: StudyStatus;
+  onRead: () => void;
+  onSpeak: () => void;
+  onCycleStatus: () => void;
+}) {
+  return (
+    <article
+      className={cn(
+        "rounded-xl border border-[#f3eeff] bg-[#fbfbfb] p-4 transition-colors",
+        status === "unknown" && "border-[#ffb9c8] bg-[#fff8fa]",
+        status === "known" && "border-[#d8c5ff] bg-[#fbf8ff]"
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-lg font-black leading-tight text-foreground">{item.term}</h3>
+          <p className="mt-1 text-xs font-bold text-[#8f5cff]">{item.pronunciation}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onSpeak}
+          className="rounded-lg bg-[#f2e9ff] p-2 text-[#9a63ff] transition-colors hover:bg-[#eadcff]"
+          title="发音"
+        >
+          <Volume2 className="h-4 w-4" />
+        </button>
+      </div>
+      <p className="mt-3 text-sm font-black">{item.meaning}</p>
+      <p className="mt-1 text-xs font-semibold text-muted-foreground">{item.hint}</p>
+      <div className="mt-3 rounded-lg border-l-2 border-[#b995ff] bg-[#fbf8ff] px-3 py-2 text-sm leading-6 text-muted-foreground">
+        <p className="italic text-foreground">"{item.sentence}"</p>
+        {item.translation && <p className="mt-1">{item.translation}</p>}
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={onRead}
+          className="rounded-lg border border-[#eadfff] bg-white py-2 text-xs font-black transition-colors hover:bg-[#f7f0ff]"
+          title="点读跳转"
+        >
+          点读
+        </button>
+        <button
+          type="button"
+          onClick={onCycleStatus}
+          className={cn(
+            "rounded-lg border border-[#eadfff] bg-white py-2 text-xs font-black transition-colors hover:bg-[#f7f0ff]",
+            status === "unknown" && "border-[#ff9bb0] bg-[#fff0f5] text-[#e11d48]",
+            status === "known" && "border-[#b995ff] bg-[#f2e9ff] text-[#8f5cff]"
+          )}
+        >
+          {status === "unknown" ? "不认识" : status === "known" ? "认识" : "标记"}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function StudyTermPopover({
+  item,
+  status,
+  position,
+  onClose,
+  onSpeak,
+  onRead,
+  onCycleStatus,
+}: {
+  item: StudyItem;
+  status?: StudyStatus;
+  position: { left: number; top: number };
+  onClose: () => void;
+  onSpeak: () => void;
+  onRead: () => void;
+  onCycleStatus: () => void;
+}) {
+  return (
+    <div
+      data-study-popover
+      style={{ left: position.left, top: position.top }}
+      className="fixed z-[9998] w-[280px] -translate-x-1/2 rounded-xl border border-[#eadfff] bg-white p-4 text-left shadow-[0_22px_60px_rgba(40,24,88,0.22)]"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-black leading-tight">{item.term}</h3>
+          <p className="mt-1 text-xs font-bold text-[#8f5cff]">{item.pronunciation}</p>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onSpeak}
+            className="rounded-lg bg-[#f2e9ff] p-1.5 text-[#9a63ff] hover:bg-[#eadcff]"
+            title="发音"
+          >
+            <Volume2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-muted-foreground hover:bg-[#f2e9ff] hover:text-[#8f5cff]"
+            title="关闭"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      <p className="mt-3 text-sm font-black">{item.meaning}</p>
+      <p className="mt-2 text-xs italic leading-5 text-muted-foreground">"{item.sentence}"</p>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={onRead}
+          className="rounded-lg border border-[#eadfff] py-2 text-xs font-black hover:bg-[#f7f0ff]"
+          title="点读跳转"
+        >
+          点读
+        </button>
+        <button
+          type="button"
+          onClick={onCycleStatus}
+          className={cn(
+            "rounded-lg border border-[#eadfff] py-2 text-xs font-black hover:bg-[#f7f0ff]",
+            status === "unknown" && "border-[#ff9bb0] bg-[#fff0f5] text-[#e11d48]",
+            status === "known" && "border-[#b995ff] bg-[#f2e9ff] text-[#8f5cff]"
+          )}
+        >
+          {status === "unknown" ? "不认识" : status === "known" ? "认识" : "标记"}
+        </button>
+      </div>
+    </div>
   );
 }
 

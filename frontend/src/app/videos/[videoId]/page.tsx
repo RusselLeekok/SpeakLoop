@@ -36,6 +36,7 @@ export default function VideoDetailPage() {
   const progressMs =
     serverProgress?.last_time_ms ?? getLocalProgress(videoId)?.last_time_ms ?? 0;
   const hasProgress = progressMs > 3000;
+  const tags = video?.tags?.length ? video.tags.slice(0, 4) : video?.category ? [video.category] : [];
 
   return (
     <div className="min-h-screen bg-aurora">
@@ -88,7 +89,9 @@ export default function VideoDetailPage() {
                 <div className="space-y-5">
                   <div className="swiss-label text-brand">素材详情</div>
                   <div className="flex flex-wrap items-center gap-3">
-                    {video.category && <Badge variant="secondary">{video.category}</Badge>}
+                    {tags.map((tag) => (
+                      <Badge key={tag} variant="secondary">{tag}</Badge>
+                    ))}
                     <span className="flex items-center gap-1 rounded-md border-2 border-foreground bg-white px-2 py-1 text-sm font-bold shadow-soft">
                       <Clock className="h-4 w-4" />
                       {formatDuration(video.duration)}

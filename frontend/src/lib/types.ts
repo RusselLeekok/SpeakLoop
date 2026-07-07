@@ -25,6 +25,7 @@ export interface VideoPublic {
   title: string;
   description: string | null;
   category: string | null;
+  tags: string[];
   cover_url: string | null;
   duration: number | null;
   subtitle_count: number;
@@ -40,6 +41,7 @@ export interface VideoAdmin {
   title: string;
   description: string | null;
   category: string | null;
+  tags: string[];
   original_filename: string | null;
   file_url: string;
   cover_url: string | null;

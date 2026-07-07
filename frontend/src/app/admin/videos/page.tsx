@@ -149,7 +149,9 @@ export default function AdminVideosPage() {
                   <TableCell><VideoCover src={v.cover_url} alt={v.title} className="w-24 rounded-xl border border-foreground/10" /></TableCell>
                   <TableCell className="max-w-64">
                     <p className="truncate font-bold">{v.title}</p>
-                    <p className="truncate text-xs font-semibold text-muted-foreground">{v.category || "未分类"}</p>
+                    <p className="truncate text-xs font-semibold text-muted-foreground">
+                      {(v.tags?.length ? v.tags : v.category ? [v.category] : []).join(" / ") || "未标签"}
+                    </p>
                   </TableCell>
                   <TableCell><StatusBadge status={v.status} /></TableCell>
                   <TableCell className="tabular-nums">{formatDuration(v.duration)}</TableCell>

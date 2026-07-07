@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from ..database import get_db
 from ..deps import get_current_user
-from ..models import LearningProgress, Subtitle, User, Video
+from ..models import LearningProgress, Subtitle, Tag, User, Video, VideoTag
 from ..schemas import (
     ProgressIn,
     ProgressOut,
@@ -17,7 +17,11 @@ router = APIRouter(prefix="/api", tags=["public"])
 
 
 def _get_published_video(db: Session, video_id: int) -> Video:
-    video = db.get(Video, video_id)
+    video = db.scalar(
+        select(Video)
+        .options(selectinload(Video.tag_links).selectinload(VideoTag.tag))
+        .where(Video.id == video_id)
+    )
     if video is None or video.status != "published":
         # 未发布 / 草稿 / 下架 / 失败视频对普通用户一律 404
         raise HTTPException(status_code=404, detail="视频不存在或未发布")
@@ -30,24 +34,40 @@ def list_videos(
     category: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    query = select(Video).where(Video.status == "published")
+    query = (
+        select(Video)
+        .options(selectinload(Video.tag_links).selectinload(VideoTag.tag))
+        .where(Video.status == "published")
+    )
     if keyword:
         like = f"%{keyword}%"
         query = query.where(Video.title.like(like) | Video.description.like(like))
     if category:
-        query = query.where(Video.category == category)
+        query = (
+            query.outerjoin(VideoTag, VideoTag.video_id == Video.id)
+            .outerjoin(Tag, Tag.id == VideoTag.tag_id)
+            .where(or_(Video.category == category, Tag.name == category))
+            .distinct()
+        )
     videos = db.scalars(query.order_by(Video.published_at.desc())).all()
     return videos
 
 
 @router.get("/videos/categories", response_model=list[str])
 def list_categories(db: Session = Depends(get_db)):
-    rows = db.scalars(
+    tag_rows = db.scalars(
+        select(Tag.name)
+        .join(VideoTag, VideoTag.tag_id == Tag.id)
+        .join(Video, Video.id == VideoTag.video_id)
+        .where(Video.status == "published")
+        .distinct()
+    ).all()
+    legacy_rows = db.scalars(
         select(Video.category)
         .where(Video.status == "published", Video.category.is_not(None))
         .distinct()
     ).all()
-    return sorted(c for c in rows if c)
+    return sorted({name for name in [*tag_rows, *legacy_rows] if name})
 
 
 @router.get("/videos/{video_id}", response_model=VideoDetailOut)
