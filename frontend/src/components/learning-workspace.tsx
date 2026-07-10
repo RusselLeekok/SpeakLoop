@@ -4,7 +4,6 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
-  BarChart3,
   Bell,
   BookOpen,
   Captions,
@@ -56,12 +55,12 @@ const progressFilters = [
 type DurationFilter = (typeof durationFilters)[number]["value"];
 type ProgressFilter = (typeof progressFilters)[number]["value"];
 type ProgressRecord = Pick<Progress, "video_id" | "last_time_ms" | "last_subtitle_id" | "updated_at">;
+const SIDEBAR_COLLAPSED_KEY = "speakloop.sidebarCollapsed";
 
 const topNav = [
   { label: "首页", href: "/", view: "discover" },
   { label: "视频库", href: "/library", view: "library" },
   { label: "我的学习", href: "/study", view: "study" },
-  { label: "图表", href: "/insights", view: "insights" },
 ] as const;
 
 const sideNav = [
@@ -69,7 +68,6 @@ const sideNav = [
   { label: "视频库", href: "/library", view: "library", icon: Library },
   { label: "精听", href: "/intensive", view: "intensive", icon: BookOpen },
   { label: "生词卡", href: "/words", view: "words", icon: Sparkles },
-  { label: "图表", href: "/insights", view: "insights", icon: BarChart3 },
   { label: "我的", href: "/study", view: "study", icon: UserIcon },
 ] as const;
 
@@ -142,6 +140,7 @@ export function LearningWorkspace({ view }: { view: WorkspaceView }) {
   const [duration, setDuration] = useState<DurationFilter>("all");
   const [progressFilter, setProgressFilter] = useState<ProgressFilter>("all");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarTransitionEnabled, setSidebarTransitionEnabled] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -156,6 +155,8 @@ export function LearningWorkspace({ view }: { view: WorkspaceView }) {
   useEffect(() => {
     setMounted(true);
     setLocalProgress(getAllLocalProgress());
+    const savedSidebarState = window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+    if (savedSidebarState === "true") setSidebarCollapsed(true);
   }, []);
 
   useEffect(() => {
@@ -175,8 +176,8 @@ export function LearningWorkspace({ view }: { view: WorkspaceView }) {
   }, [router, showUser, user?.role]);
 
   useEffect(() => {
-    ["/", "/library", "/study", "/intensive", "/words", "/insights"].forEach((path) => router.prefetch(path));
-    prewarmRoutes(["/", "/library", "/study", "/intensive", "/words", "/insights"]);
+    ["/", "/library", "/study", "/intensive", "/words"].forEach((path) => router.prefetch(path));
+    prewarmRoutes(["/", "/library", "/study", "/intensive", "/words"]);
   }, [router]);
 
   const { data: videos, isError, isLoading } = useQuery({
@@ -272,6 +273,15 @@ export function LearningWorkspace({ view }: { view: WorkspaceView }) {
     router.push(`/study?date=${formatDateKey(date)}`);
   }
 
+  function toggleSidebar() {
+    setSidebarTransitionEnabled(true);
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+      return next;
+    });
+  }
+
   function handleLogout() {
     logout();
     setNotificationsOpen(false);
@@ -288,7 +298,8 @@ export function LearningWorkspace({ view }: { view: WorkspaceView }) {
         <LearningSidebar
           pathname={pathname}
           collapsed={sidebarCollapsed}
-          onToggle={() => setSidebarCollapsed((prev) => !prev)}
+          transitionEnabled={sidebarTransitionEnabled}
+          onToggle={toggleSidebar}
           learnedCount={learnedCount}
           videoCount={rawVideos.length}
           minutes={Math.round(totalMinutes)}
@@ -516,6 +527,7 @@ function MobileNav({ pathname, onClose }: { pathname: string; onClose: () => voi
 function LearningSidebar({
   pathname,
   collapsed,
+  transitionEnabled,
   onToggle,
   learnedCount,
   videoCount,
@@ -532,6 +544,7 @@ function LearningSidebar({
 }: {
   pathname: string;
   collapsed: boolean;
+  transitionEnabled: boolean;
   onToggle: () => void;
   learnedCount: number;
   videoCount: number;
@@ -549,7 +562,8 @@ function LearningSidebar({
   return (
     <aside
       className={cn(
-        "sticky top-0 hidden h-screen shrink-0 border-r border-foreground/10 bg-white/92 backdrop-blur-xl transition-[width] duration-300 lg:flex lg:flex-col",
+        "sticky top-0 hidden h-screen shrink-0 border-r border-foreground/10 bg-white/92 backdrop-blur-xl lg:flex lg:flex-col",
+        transitionEnabled && "transition-[width] duration-300",
         collapsed ? "w-[86px]" : "w-[248px]"
       )}
     >
