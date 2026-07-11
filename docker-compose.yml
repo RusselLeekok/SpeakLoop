@@ -32,7 +32,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://speakloop_user:speakloop_password@mysql:3306/speakloop?charset=utf8mb4}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       BASE_URL: ${BASE_URL:-http://localhost:18000}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:13000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:13000,http://localhost:3001}
       UPLOAD_DIR: ${UPLOAD_DIR:-/data/uploads}
       JWT_SECRET: ${JWT_SECRET:-change-me}
       AUTO_CREATE_TABLES: ${AUTO_CREATE_TABLES:-true}

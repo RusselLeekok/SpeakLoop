@@ -783,8 +783,8 @@ function Player({
                         "cursor-pointer",
                         "relative block w-full rounded-xl border p-4 text-left transition-colors",
                         active
-                          ? "border-[#d8c5ff] bg-[#fbf8ff] text-foreground shadow-sm"
-                          : "border-[#f3eeff] bg-[#fbfbfb] text-foreground hover:border-[#eadfff] hover:bg-[#fbf8ff]"
+                          ? "border-[#f1cf72] bg-[#fff6d8] text-foreground shadow-sm"
+                          : "border-[#ececf2] bg-white text-foreground hover:border-[#dfe3ee] hover:bg-white"
                       )}
                     >
                       {practiceMode === "blank" && sub.en_text && (
@@ -796,7 +796,7 @@ function Player({
                         <span
                           className={cn(
                             "font-mono text-[11px] font-black tabular-nums",
-                            active ? "text-[#8f5cff]" : "text-[#c7a8ff]"
+                            active ? "text-[#9a6a00]" : "text-[#9aa0b8]"
                           )}
                         >
                           {formatMs(sub.start_ms).slice(0, 5)}
@@ -1127,9 +1127,9 @@ function HighlightedSubtitleText({
             data-study-term
             onClick={(event) => onTermClick(part.item!, event)}
             className={cn(
-              "inline rounded-[4px] bg-[#effaf3]/70 px-0.5 text-left font-semibold underline decoration-[#16a34a] decoration-1 underline-offset-[3px] transition-colors hover:bg-[#e5f5ea] focus:outline-none focus:ring-2 focus:ring-[#88c79d]",
-              statuses[part.item.id] === "unknown" && "bg-[#fff5f7]/80 decoration-[#e85a7a]",
-              statuses[part.item.id] === "known" && "bg-[#f7f1ff]/80 decoration-[#8f5cff]"
+              "inline rounded-[4px] px-0.5 text-left font-semibold underline decoration-[#16a34a] decoration-1 underline-offset-[3px] transition-colors hover:bg-[#e5f5ea] focus:outline-none focus:ring-2 focus:ring-[#88c79d]",
+              statuses[part.item.id] === "unknown" && "decoration-[#e85a7a] hover:bg-[#fff1f4]",
+              statuses[part.item.id] === "known" && "decoration-[#8f5cff] hover:bg-[#f5efff]"
             )}
           >
             {part.text}

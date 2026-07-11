@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,10 +8,12 @@ import {
   ArrowLeft,
   Captions,
   Check,
+  Languages,
   Loader2,
   Lock,
   LogOut,
   Plus,
+  RotateCcw,
   Save,
   Scissors,
   Trash2,
@@ -20,7 +21,6 @@ import {
   Wand2,
 } from "lucide-react";
 
-import { StatusBadge } from "@/components/status-badge";
 import { useNavigationFeedback } from "@/components/navigation-feedback";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -50,6 +50,7 @@ type EditableSubtitle = {
 };
 
 const LOCKED_RETURN_DELAY_MS = 1200;
+const MAX_UNDO_HISTORY = 50;
 
 function toEditable(subtitles: Subtitle[]): EditableSubtitle[] {
   return subtitles.map((item) => ({
@@ -84,6 +85,26 @@ function msFromSeconds(value: string) {
   return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed * 1000)) : 0;
 }
 
+function cloneRows(items: EditableSubtitle[]) {
+  return items.map((item) => ({ ...item }));
+}
+
+function rowsEqual(left: EditableSubtitle[], right: EditableSubtitle[]) {
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const other = right[index];
+    return (
+      other &&
+      item.id === other.id &&
+      item.start_ms === other.start_ms &&
+      item.end_ms === other.end_ms &&
+      item.en_text === other.en_text &&
+      item.zh_text === other.zh_text &&
+      item.sort_order === other.sort_order
+    );
+  });
+}
+
 export default function AdminSubtitlesPage() {
   const params = useParams<{ videoId: string }>();
   const videoId = Number(params.videoId);
@@ -97,11 +118,14 @@ export default function AdminSubtitlesPage() {
   const subtitleLockedRef = useRef(false);
   const autoReturningRef = useRef(false);
   const currentIndexRef = useRef(-1);
+  const undoHistoryRef = useRef<EditableSubtitle[][]>([]);
+  const savedRowsRef = useRef<EditableSubtitle[]>([]);
   const [rows, setRows] = useState<EditableSubtitle[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [activeIndex, setActiveIndex] = useState(0);
   const [subtitleLocked, setSubtitleLocked] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [undoDepth, setUndoDepth] = useState(0);
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [subtitleTaskId, setSubtitleTaskId] = useState<number | null>(null);
@@ -136,10 +160,14 @@ export default function AdminSubtitlesPage() {
 
   useEffect(() => {
     if (!data?.subtitles) return;
-    setRows(toEditable(data.subtitles));
+    const nextRows = toEditable(data.subtitles);
+    setRows(nextRows);
+    savedRowsRef.current = cloneRows(nextRows);
     setActiveIndex(0);
     setCurrentIndex(-1);
     currentIndexRef.current = -1;
+    undoHistoryRef.current = [];
+    setUndoDepth(0);
     setDirty(false);
   }, [data?.subtitles]);
 
@@ -156,7 +184,6 @@ export default function AdminSubtitlesPage() {
   useEffect(() => {
     const task = taskQuery.data;
     if (task?.status === "completed") {
-      setMessage("字幕已生成，正在刷新列表。");
       void queryClient.invalidateQueries({ queryKey: ["admin-video", videoId] });
       void queryClient.invalidateQueries({ queryKey: ["admin-videos"] });
       void queryClient.invalidateQueries({ queryKey: ["admin-subtitles", videoId] });
@@ -208,9 +235,12 @@ export default function AdminSubtitlesPage() {
         })),
       }),
     onSuccess: (res) => {
-      setRows(toEditable(res.subtitles));
+      const nextRows = toEditable(res.subtitles);
+      setRows(nextRows);
+      savedRowsRef.current = cloneRows(nextRows);
+      undoHistoryRef.current = [];
+      setUndoDepth(0);
       setDirty(false);
-      setMessage("字幕已保存。");
       void queryClient.invalidateQueries({ queryKey: ["admin-video", videoId] });
       void queryClient.invalidateQueries({ queryKey: ["admin-videos"] });
       void queryClient.invalidateQueries({ queryKey: ["admin-subtitles", videoId] });
@@ -225,11 +255,36 @@ export default function AdminSubtitlesPage() {
     return items.map((item, index) => ({ ...item, sort_order: index }));
   }
 
+  function pushUndoSnapshot(snapshot: EditableSubtitle[]) {
+    const history = undoHistoryRef.current;
+    const cloned = cloneRows(snapshot);
+    const last = history[history.length - 1];
+    if (last && rowsEqual(last, cloned)) return;
+    history.push(cloned);
+    if (history.length > MAX_UNDO_HISTORY) history.shift();
+    setUndoDepth(history.length);
+  }
+
   function commitRows(nextRows: EditableSubtitle[], nextActiveIndex = activeIndex) {
     const normalized = resequence(nextRows);
+    if (!rowsEqual(rows, normalized)) pushUndoSnapshot(rows);
     setRows(normalized);
     setActiveIndex(normalized.length ? Math.min(Math.max(nextActiveIndex, 0), normalized.length - 1) : 0);
-    setDirty(true);
+    setDirty(!rowsEqual(normalized, savedRowsRef.current));
+  }
+
+  function undoLastChange() {
+    const previousRows = undoHistoryRef.current.pop();
+    if (!previousRows) return;
+    const restoredRows = cloneRows(previousRows);
+    setRows(restoredRows);
+    setActiveIndex(previousRows.length ? Math.min(activeIndex, previousRows.length - 1) : 0);
+    setUndoDepth(undoHistoryRef.current.length);
+    setDirty(!rowsEqual(restoredRows, savedRowsRef.current));
+  }
+
+  function requestTranslation() {
+    setMessage(null);
   }
 
   function splitText(text: string) {
@@ -382,9 +437,23 @@ export default function AdminSubtitlesPage() {
   }
 
   function updateRow(index: number, patch: Partial<EditableSubtitle>) {
-    setRows((prev) => prev.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+    const nextRows = rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row));
+    if (rowsEqual(rows, nextRows)) return;
+    pushUndoSnapshot(rows);
+    setRows(nextRows);
     setActiveIndex(index);
-    setDirty(true);
+    setDirty(!rowsEqual(nextRows, savedRowsRef.current));
+  }
+
+  function playWithoutPausing(el: HTMLVideoElement) {
+    const play = () => {
+      void el.play().catch(() => {
+        // Browser can reject if the click gesture is no longer active.
+      });
+    };
+    play();
+    window.requestAnimationFrame(play);
+    window.setTimeout(play, 120);
   }
 
   function seekTo(row: EditableSubtitle, index: number, shouldPlay = true) {
@@ -393,11 +462,16 @@ export default function AdminSubtitlesPage() {
     currentIndexRef.current = index;
     const el = videoRef.current;
     if (!el) return;
-    el.currentTime = row.start_ms / 1000 + 0.001;
     if (shouldPlay) {
-      void el.play();
+      const resumeAfterSeek = () => playWithoutPausing(el);
+      el.addEventListener("seeked", resumeAfterSeek, { once: true });
+      el.addEventListener("canplay", resumeAfterSeek, { once: true });
+      playWithoutPausing(el);
+      el.currentTime = row.start_ms / 1000 + 0.001;
+      playWithoutPausing(el);
       if (subtitleLockedRef.current) scrollToRowAnchor(index);
     } else {
+      el.currentTime = row.start_ms / 1000 + 0.001;
       el.pause();
       setSubtitleLock(true);
       scheduleLockedReturn();
@@ -453,38 +527,7 @@ export default function AdminSubtitlesPage() {
   const subtitleTaskPending = activeTask?.status === "queued" || activeTask?.status === "running";
 
   return (
-    <div className="w-full max-w-none space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <Button variant="ghost" size="icon" onClick={requestExit} aria-label="返回最终确认页">
-          <ArrowLeft />
-        </Button>
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-3xl font-black tracking-normal">
-            字幕轨道编辑{video ? ` · ${video.title}` : ""}
-          </h1>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-sm font-semibold text-muted-foreground">
-            {video && <StatusBadge status={video.status} />}
-            <span>预览视频、校对时间轴和字幕文本。保存后返回最后发布步骤。</span>
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || rows.length === 0}>
-            <Save />
-            {saveMutation.isPending ? "保存中..." : "保存"}
-          </Button>
-          <Button variant="brand" onClick={saveAndExit} disabled={saveMutation.isPending || rows.length === 0}>
-            <Save />
-            保存退出
-          </Button>
-          <Button variant="outline" onClick={requestExit}>
-            <LogOut />
-            退出
-          </Button>
-        </div>
-      </div>
-
-      {message && <div className="rounded-lg border border-foreground/10 bg-white px-4 py-3 text-sm font-bold shadow-sm">{message}</div>}
-
+    <div className="-mt-4 w-full max-w-none space-y-3 md:-mt-6">
       {data && data.warnings.length > 0 && (
         <Card className="border-amber-700 bg-amber-50">
           <CardHeader className="pb-2">
@@ -501,31 +544,64 @@ export default function AdminSubtitlesPage() {
         </Card>
       )}
 
-      <div className="grid min-h-[74vh] gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(30rem,0.85fr)] 2xl:grid-cols-[minmax(44rem,1.35fr)_minmax(36rem,0.9fr)]">
-        <section className="surface bg-white p-5">
-          <div className="sticky top-24 overflow-hidden rounded-lg border-2 border-foreground bg-black shadow-soft">
-            {video?.file_url ? (
-              <div className="relative">
-                <video ref={videoRef} src={video.file_url} controls className="aspect-video w-full bg-black object-contain" />
-                {currentSubtitle?.en_text && (
-                  <div className="pointer-events-none absolute bottom-12 left-1/2 max-w-[82%] -translate-x-1/2 rounded-md bg-black/70 px-4 py-2 text-center text-sm font-bold text-white shadow-soft">
-                    {currentSubtitle.en_text}
-                    {currentSubtitle.zh_text && <div className="mt-1 text-xs text-white/85">{currentSubtitle.zh_text}</div>}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <Skeleton className="aspect-video w-full" />
-            )}
+      <div className="grid min-h-[calc(100dvh-7.5rem)] gap-4 xl:grid-cols-[minmax(0,1.34fr)_minmax(32rem,0.82fr)] 2xl:grid-cols-[minmax(50rem,1.42fr)_minmax(37rem,0.85fr)]">
+        <section className="surface flex min-h-[calc(100dvh-7.5rem)] flex-col bg-white p-4">
+          <div className="flex items-center">
+            <Button variant="ghost" size="icon" onClick={requestExit} aria-label="返回最终确认页" title={video?.title ? `返回：${video.title}` : "返回"}>
+              <ArrowLeft />
+            </Button>
+          </div>
+          <div className="flex flex-1 items-center py-4">
+            <div className="w-full overflow-hidden rounded-lg border-2 border-foreground bg-black shadow-soft">
+              {video?.file_url ? (
+                <div className="relative">
+                  <video ref={videoRef} src={video.file_url} controls className="aspect-video w-full bg-black object-contain" />
+                  {currentSubtitle?.en_text && (
+                    <div className="pointer-events-none absolute bottom-12 left-1/2 max-w-[82%] -translate-x-1/2 rounded-md bg-black/70 px-4 py-2 text-center text-sm font-bold text-white shadow-soft">
+                      {currentSubtitle.en_text}
+                      {currentSubtitle.zh_text && <div className="mt-1 text-xs text-white/85">{currentSubtitle.zh_text}</div>}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Skeleton className="aspect-video w-full" />
+              )}
+            </div>
           </div>
         </section>
 
         <section className="surface bg-white p-3">
-          <div className="flex flex-wrap items-start justify-between gap-3 px-2 py-2">
-            <h2 className="text-xl font-black">字幕列表（{rows.length} 句）</h2>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-2 py-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" size="sm" variant="outline" onClick={undoLastChange} disabled={undoDepth === 0} title="撤销上一步修改">
+                <RotateCcw className="h-4 w-4" />
+                撤回
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={requestTranslation} disabled={rows.length === 0} title="预留中文翻译入口">
+                <Languages className="h-4 w-4" />
+                翻译
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" size="sm" variant="outline" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || rows.length === 0}>
+                <Save className="h-4 w-4" />
+                {saveMutation.isPending ? "保存中..." : "保存"}
+              </Button>
+              <Button type="button" size="sm" variant="brand" onClick={saveAndExit} disabled={saveMutation.isPending || rows.length === 0}>
+                <Save className="h-4 w-4" />
+                保存退出
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={requestExit}>
+                <LogOut className="h-4 w-4" />
+                退出
+              </Button>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-start justify-between gap-3 px-2 py-1">
+            <h2 className="text-lg font-black">字幕列表（{rows.length} 句）</h2>
             {dirty && <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-black text-amber-900">有未保存修改</span>}
           </div>
-          <div className="mb-2 flex flex-wrap items-center gap-2 px-2">
+          <div className="mb-1 flex flex-wrap items-center gap-2 px-2">
             <Button type="button" size="sm" variant="outline" onClick={() => addSubtitleAfterSelection()}>
               <Plus className="h-4 w-4" />
               新增
@@ -553,10 +629,6 @@ export default function AdminSubtitlesPage() {
               {subtitleLocked ? "取消锁定" : "锁定"}
             </Button>
           </div>
-          <p className="px-2 pb-2 text-xs font-bold text-muted-foreground">
-            {subtitleLocked ? "锁定中：播放字幕会固定回到同一位置；编辑时不会立即回弹。" : "未锁定：只高亮当前播放字幕，不自动移动列表。"}
-          </p>
-
           {isLoading ? (
             <div className="space-y-3 p-2">
               {Array.from({ length: 5 }).map((_, index) => (
@@ -566,7 +638,7 @@ export default function AdminSubtitlesPage() {
           ) : rows.length > 0 ? (
             <div
               ref={timelineRef}
-              className="thin-scrollbar max-h-[70vh] space-y-5 overflow-auto p-2 pr-3 [scroll-padding-top:32px]"
+              className="thin-scrollbar max-h-[calc(100dvh-16rem)] space-y-3 overflow-auto p-2 pr-3 [scroll-padding-top:24px]"
               onScroll={() => {
                 if (!subtitleLockedRef.current || autoReturningRef.current) return;
                 scheduleLockedReturn();
@@ -580,7 +652,7 @@ export default function AdminSubtitlesPage() {
                   }}
                   data-subtitle-index={index}
                   className={cn(
-                    "group grid cursor-pointer gap-3 text-sm sm:grid-cols-[4.9rem_minmax(0,1fr)]",
+                    "group grid cursor-pointer gap-2 text-sm sm:grid-cols-[4.35rem_minmax(0,1fr)]",
                     index === activeIndex && "active",
                     index === currentIndex && "playing"
                   )}
@@ -589,7 +661,7 @@ export default function AdminSubtitlesPage() {
                   <button
                     type="button"
                     className={cn(
-                      "pt-2 text-left font-mono text-xs font-bold tabular-nums text-muted-foreground transition-colors",
+                      "pt-1.5 text-left font-mono text-[11px] font-bold leading-snug tabular-nums text-muted-foreground transition-colors",
                       index === currentIndex && "text-[#476b97]",
                       index === activeIndex && "text-foreground"
                     )}
@@ -604,7 +676,7 @@ export default function AdminSubtitlesPage() {
                   </button>
                   <div
                     className={cn(
-                      "relative min-h-[84px] rounded-lg border border-foreground/10 bg-white p-4 shadow-sm transition-[background,border-color,box-shadow]",
+                      "relative min-h-[74px] rounded-lg border border-foreground/10 bg-white p-3 shadow-sm transition-[background,border-color,box-shadow]",
                       index === activeIndex && "border-[#e3ca63] bg-[#fff7cf] shadow-[0_0_0_2px_rgba(227,202,99,0.28)]",
                       index === currentIndex && index !== activeIndex && "border-[#9bb6d9] bg-[#f3f7fd] shadow-[0_0_0_2px_rgba(155,182,217,0.28)]"
                     )}
@@ -637,14 +709,14 @@ export default function AdminSubtitlesPage() {
                         <Plus className="h-3.5 w-3.5" />
                       </Button>
                     </div>
-                    <div className="mb-2 flex flex-wrap gap-2 pr-20" onClick={(event) => event.stopPropagation()}>
+                    <div className="mb-2 flex flex-wrap gap-2 pr-[4.5rem]" onClick={(event) => event.stopPropagation()}>
                       <Input
                         type="number"
                         step="0.01"
                         value={seconds(row.start_ms)}
                         onFocus={() => beginEditingRow(index)}
                         onChange={(e) => updateRow(index, { start_ms: msFromSeconds(e.target.value) })}
-                        className={cn("h-8 w-24 font-mono", index === activeIndex && "border-[#c2aa38]/40 bg-white/70")}
+                        className={cn("h-7 w-20 px-2 font-mono text-xs", index === activeIndex && "border-[#c2aa38]/40 bg-white/70")}
                       />
                       <Input
                         type="number"
@@ -652,16 +724,16 @@ export default function AdminSubtitlesPage() {
                         value={seconds(row.end_ms)}
                         onFocus={() => beginEditingRow(index)}
                         onChange={(e) => updateRow(index, { end_ms: msFromSeconds(e.target.value) })}
-                        className={cn("h-8 w-24 font-mono", index === activeIndex && "border-[#c2aa38]/40 bg-white/70")}
+                        className={cn("h-7 w-20 px-2 font-mono text-xs", index === activeIndex && "border-[#c2aa38]/40 bg-white/70")}
                       />
                     </div>
-                    <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
+                    <div className="space-y-1.5" onClick={(event) => event.stopPropagation()}>
                       <Textarea
                         value={row.en_text}
                         onFocus={() => beginEditingRow(index)}
                         onChange={(e) => updateRow(index, { en_text: e.target.value })}
                         rows={2}
-                        className={cn(index === activeIndex && "text-foreground")}
+                        className={cn("min-h-[54px] px-3 py-1.5 leading-snug", index === activeIndex && "text-foreground")}
                       />
                       <Textarea
                         value={row.zh_text}
@@ -669,7 +741,7 @@ export default function AdminSubtitlesPage() {
                         onChange={(e) => updateRow(index, { zh_text: e.target.value })}
                         rows={1}
                         placeholder="中文字幕，可选"
-                        className={cn(index === activeIndex && "text-foreground")}
+                        className={cn("min-h-[40px] px-3 py-1.5 leading-snug", index === activeIndex && "text-foreground")}
                       />
                     </div>
                   </div>
