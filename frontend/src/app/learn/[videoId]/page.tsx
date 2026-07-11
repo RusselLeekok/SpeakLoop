@@ -8,7 +8,6 @@ import { useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ChevronDown,
-  ListRestart,
   Pause,
   Play,
   Repeat,
@@ -179,12 +178,10 @@ function Player({
   const practiceMenuRef = useRef<HTMLDivElement>(null);
   const practicePopupRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
-  const practiceModeRef = useRef<PracticeMode>("off");
   const lockedReturnTimerRef = useRef<number | null>(null);
   const autoReturningRef = useRef(false);
   const restoreAppliedRef = useRef(false);
   autoScrollRef.current = autoScroll;
-  practiceModeRef.current = practiceMode;
 
   const hasZh = useMemo(() => subtitles.some((s) => s.zh_text), [subtitles]);
   const studyItems = useMemo(() => collectStudyItems(subtitles), [subtitles]);
@@ -243,10 +240,10 @@ function Player({
 
   const scheduleLockedReturn = useCallback(() => {
     clearLockedReturnTimer();
-    if (!autoScrollRef.current || practiceModeRef.current === "intensive") return;
+    if (!autoScrollRef.current) return;
     lockedReturnTimerRef.current = window.setTimeout(() => {
       lockedReturnTimerRef.current = null;
-      if (!autoScrollRef.current || practiceModeRef.current === "intensive") return;
+      if (!autoScrollRef.current) return;
       scrollToCurrentSubtitle();
     }, LOCKED_RETURN_DELAY_MS);
   }, [clearLockedReturnTimer, scrollToCurrentSubtitle]);
@@ -259,7 +256,7 @@ function Player({
         clearLockedReturnTimer();
         return;
       }
-      if (practiceModeRef.current !== "intensive") scrollToCurrentSubtitle();
+      scrollToCurrentSubtitle();
     },
     [clearLockedReturnTimer, scrollToCurrentSubtitle]
   );
@@ -285,7 +282,6 @@ function Player({
             if (
               index >= 0 &&
               autoScrollRef.current &&
-              practiceModeRef.current !== "intensive" &&
               !lockedReturnTimerRef.current &&
               !autoReturningRef.current
             ) {
@@ -369,9 +365,7 @@ function Player({
       currentIndexRef.current = item.subtitleIndex;
       setCurrentIndex(item.subtitleIndex);
       clearLockedReturnTimer();
-      if (autoScrollRef.current && practiceModeRef.current !== "intensive") {
-        scrollToIndex(item.subtitleIndex);
-      }
+      if (autoScrollRef.current) scrollToIndex(item.subtitleIndex);
     },
     [clearLockedReturnTimer, seekToSubtitle, scrollToIndex]
   );
@@ -743,32 +737,24 @@ function Player({
                 </ToolbarButton>
               </div>
               <label
-                className={cn(
-                  "ml-auto flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-black transition-colors",
-                  autoScroll
-                    ? "border-foreground bg-[#e9f8ff] text-foreground shadow-soft"
-                    : "border-foreground/10 bg-[#f6f6f3] text-muted-foreground"
-                )}
-                title={autoScroll ? "锁定中：播放字幕会固定回到同一位置" : "取消锁定：只高亮当前句，不移动列表"}
+                className="ml-auto flex items-center gap-1.5 text-xs font-bold text-muted-foreground"
+                title={autoScroll ? "跟随当前播放字幕" : "关闭字幕跟随"}
               >
                 <Switch checked={autoScroll} onCheckedChange={setSubtitleLock} />
-                {autoScroll ? "锁定" : "取消锁定"}
+                跟随
               </label>
             </div>
-            <p className="mt-2 text-xs font-bold text-muted-foreground">
-              {autoScroll ? "锁定中：手动查看其他字幕后，会稍后回到当前播放句。" : "未锁定：播放时只高亮当前句，字幕列表不会自动滚动。"}
-            </p>
           </div>
 
           <div
             ref={listRef}
-            className="thin-scrollbar fade-mask-y relative z-0 min-h-0 flex-1 overflow-y-auto scroll-smooth rounded-b-lg bg-[#f7f8f4] p-3"
+            className="thin-scrollbar fade-mask-y relative z-0 min-h-0 flex-1 overflow-y-auto scroll-smooth rounded-b-lg bg-white p-3"
             onScroll={() => {
-              if (!autoScrollRef.current || autoReturningRef.current || practiceModeRef.current === "intensive") return;
+              if (!autoScrollRef.current || autoReturningRef.current) return;
               scheduleLockedReturn();
             }}
           >
-            <ol className="relative space-y-2.5">
+            <ol className="relative space-y-3">
               {subtitles.map((sub, i) => {
                 const active = i === currentIndex;
                 return (
@@ -783,22 +769,22 @@ function Player({
                       onClick={() => {
                         seekToSubtitle(i, { play: true });
                         clearLockedReturnTimer();
-                        if (autoScrollRef.current && practiceModeRef.current !== "intensive") scrollToIndex(i);
+                        if (autoScrollRef.current) scrollToIndex(i);
                       }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
                           seekToSubtitle(i, { play: true });
                           clearLockedReturnTimer();
-                          if (autoScrollRef.current && practiceModeRef.current !== "intensive") scrollToIndex(i);
+                          if (autoScrollRef.current) scrollToIndex(i);
                         }
                       }}
                       className={cn(
                         "cursor-pointer",
-                        "relative block w-full rounded-lg border-2 px-3.5 py-3 text-left transition-all",
+                        "relative block w-full rounded-xl border p-4 text-left transition-colors",
                         active
-                          ? "border-foreground bg-accent text-foreground shadow-soft"
-                          : "border-foreground/10 bg-white text-foreground shadow-sm hover:border-brand/70 hover:bg-[#fbfdff]"
+                          ? "border-[#d8c5ff] bg-[#fbf8ff] text-foreground shadow-sm"
+                          : "border-[#f3eeff] bg-[#fbfbfb] text-foreground hover:border-[#eadfff] hover:bg-[#fbf8ff]"
                       )}
                     >
                       {practiceMode === "blank" && sub.en_text && (
@@ -806,20 +792,19 @@ function Player({
                           0/1
                         </span>
                       )}
-                      <div className="mb-2 flex items-center gap-2">
+                      <div className="mb-2 flex items-center justify-between gap-2">
                         <span
                           className={cn(
-                            "rounded-full px-2 py-0.5 font-mono text-[11px] font-black tabular-nums",
-                            active ? "bg-foreground text-white" : "bg-[#eef0ea] text-muted-foreground"
+                            "font-mono text-[11px] font-black tabular-nums",
+                            active ? "text-[#8f5cff]" : "text-[#c7a8ff]"
                           )}
                         >
                           {formatMs(sub.start_ms).slice(0, 5)}
                         </span>
-                        {active && <span className="text-[11px] font-black text-foreground/70">正在播放</span>}
                       </div>
                       <BlurredSubtitle hidden={subtitlesHidden} compact>
                         {language !== "zh" && (
-                          <span className={cn("block text-[15px] leading-7", active && "font-black")}>
+                          <span className="block text-[15px] font-semibold leading-7">
                             {practiceMode === "blank" ? (
                               <ClozeText text={sub.en_text} />
                             ) : (
@@ -846,14 +831,6 @@ function Player({
               })}
             </ol>
 
-            {autoScroll && practiceMode !== "intensive" && currentIndex >= 0 && (
-              <div className="pointer-events-none sticky bottom-3 flex justify-center">
-                <Button size="sm" variant="brand" className="pointer-events-auto" onClick={() => scrollToCurrentSubtitle()}>
-                  <ListRestart className="h-4 w-4" />
-                  回到当前句
-                </Button>
-              </div>
-            )}
           </div>
         </aside>
 
@@ -1150,9 +1127,9 @@ function HighlightedSubtitleText({
             data-study-term
             onClick={(event) => onTermClick(part.item!, event)}
             className={cn(
-              "inline rounded-sm border-b-2 border-[#16a34a] pb-0.5 text-left font-semibold transition-colors hover:bg-[#e8f3ea] focus:outline-none focus:ring-2 focus:ring-[#88c79d]",
-              statuses[part.item.id] === "unknown" && "border-[#e85a7a] bg-[#fff0f5]",
-              statuses[part.item.id] === "known" && "border-[#8f5cff] bg-[#f5efff]"
+              "inline rounded-[4px] bg-[#effaf3]/70 px-0.5 text-left font-semibold underline decoration-[#16a34a] decoration-1 underline-offset-[3px] transition-colors hover:bg-[#e5f5ea] focus:outline-none focus:ring-2 focus:ring-[#88c79d]",
+              statuses[part.item.id] === "unknown" && "bg-[#fff5f7]/80 decoration-[#e85a7a]",
+              statuses[part.item.id] === "known" && "bg-[#f7f1ff]/80 decoration-[#8f5cff]"
             )}
           >
             {part.text}
