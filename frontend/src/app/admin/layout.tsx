@@ -24,7 +24,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const isLoginPage = pathname === "/admin/login";
   const ready = mounted && hydrated;
   const isAdmin = user?.role === "admin";
-  const widePage = pathname === "/admin/videos/new" || /^\/admin\/videos\/[^/]+\/edit$/.test(pathname);
+  const widePage =
+    pathname === "/admin/videos/new" ||
+    /^\/admin\/videos\/[^/]+\/edit$/.test(pathname) ||
+    /^\/admin\/videos\/[^/]+\/subtitles$/.test(pathname);
 
   useEffect(() => {
     if (ready && !isLoginPage && !isAdmin) router.replace("/admin/login");

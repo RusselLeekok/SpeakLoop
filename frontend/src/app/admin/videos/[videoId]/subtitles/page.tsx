@@ -4,7 +4,21 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, Captions, Loader2, LogOut, Save, Wand2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Captions,
+  Check,
+  Loader2,
+  Lock,
+  LogOut,
+  Plus,
+  Save,
+  Scissors,
+  Trash2,
+  Unlock,
+  Wand2,
+} from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
 import { useNavigationFeedback } from "@/components/navigation-feedback";
@@ -34,6 +48,8 @@ type EditableSubtitle = {
   zh_text: string;
   sort_order: number;
 };
+
+const LOCKED_RETURN_DELAY_MS = 1200;
 
 function toEditable(subtitles: Subtitle[]): EditableSubtitle[] {
   return subtitles.map((item) => ({
@@ -75,9 +91,16 @@ export default function AdminSubtitlesPage() {
   const navigation = useNavigationFeedback();
   const queryClient = useQueryClient();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const rowRefs = useRef<Array<HTMLElement | null>>([]);
+  const lockedReturnTimerRef = useRef<number | null>(null);
+  const subtitleLockedRef = useRef(false);
+  const autoReturningRef = useRef(false);
   const currentIndexRef = useRef(-1);
   const [rows, setRows] = useState<EditableSubtitle[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [subtitleLocked, setSubtitleLocked] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -114,8 +137,21 @@ export default function AdminSubtitlesPage() {
   useEffect(() => {
     if (!data?.subtitles) return;
     setRows(toEditable(data.subtitles));
+    setActiveIndex(0);
+    setCurrentIndex(-1);
+    currentIndexRef.current = -1;
     setDirty(false);
   }, [data?.subtitles]);
+
+  useEffect(() => {
+    return () => {
+      if (lockedReturnTimerRef.current) window.clearTimeout(lockedReturnTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    rowRefs.current = rowRefs.current.slice(0, rows.length);
+  }, [rows.length]);
 
   useEffect(() => {
     const task = taskQuery.data;
@@ -150,6 +186,9 @@ export default function AdminSubtitlesPage() {
         if (idx !== currentIndexRef.current) {
           currentIndexRef.current = idx;
           setCurrentIndex(idx);
+          if (idx >= 0 && subtitleLockedRef.current && !lockedReturnTimerRef.current && !autoReturningRef.current) {
+            scrollToRowAnchor(idx);
+          }
         }
       }
       rafId = requestAnimationFrame(sync);
@@ -179,16 +218,190 @@ export default function AdminSubtitlesPage() {
     onError: (err) => setMessage(err instanceof Error ? err.message : "保存失败。"),
   });
 
-  function updateRow(index: number, patch: Partial<EditableSubtitle>) {
-    setRows((prev) => prev.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+  const selectedIndex = rows.length > 0 ? Math.min(Math.max(activeIndex, 0), rows.length - 1) : -1;
+  const selectedRow = selectedIndex >= 0 ? rows[selectedIndex] : null;
+
+  function resequence(items: EditableSubtitle[]) {
+    return items.map((item, index) => ({ ...item, sort_order: index }));
+  }
+
+  function commitRows(nextRows: EditableSubtitle[], nextActiveIndex = activeIndex) {
+    const normalized = resequence(nextRows);
+    setRows(normalized);
+    setActiveIndex(normalized.length ? Math.min(Math.max(nextActiveIndex, 0), normalized.length - 1) : 0);
     setDirty(true);
   }
 
-  function seekTo(row: EditableSubtitle) {
+  function splitText(text: string) {
+    const clean = text.trim();
+    if (!clean) return ["", ""];
+    const midpoint = Math.floor(clean.length / 2);
+    const leftSpace = clean.lastIndexOf(" ", midpoint);
+    const rightSpace = clean.indexOf(" ", midpoint);
+    const cut =
+      leftSpace > clean.length * 0.28
+        ? leftSpace
+        : rightSpace > 0 && rightSpace < clean.length * 0.72
+          ? rightSpace
+          : midpoint;
+    return [clean.slice(0, cut).trim(), clean.slice(cut).trim()];
+  }
+
+  function addSubtitleAfterSelection(baseIndex = selectedIndex) {
+    const items = [...rows];
+    const pivotIndex = baseIndex >= 0 ? baseIndex : items.length - 1;
+    const pivot = items[pivotIndex];
+    const next = items[pivotIndex + 1];
+    const hasGap = pivot && next && next.start_ms - pivot.end_ms >= 500;
+    const start = hasGap
+      ? pivot.end_ms
+      : items.length > 0
+        ? items[items.length - 1].end_ms
+        : Math.floor((videoRef.current?.currentTime ?? 0) * 1000);
+    const end = hasGap && next ? next.start_ms : start + 2000;
+    const insertIndex = hasGap ? pivotIndex + 1 : items.length;
+    items.splice(insertIndex, 0, {
+      id: null,
+      start_ms: start,
+      end_ms: end,
+      en_text: "",
+      zh_text: "",
+      sort_order: insertIndex,
+    });
+    commitRows(items, insertIndex);
+    window.setTimeout(() => scrollToRowAnchor(insertIndex), 0);
+  }
+
+  function deleteSelectedSubtitle() {
+    if (selectedIndex < 0) return;
+    commitRows(rows.filter((_, index) => index !== selectedIndex), Math.max(0, selectedIndex - 1));
+  }
+
+  function mergeSelectedSubtitle() {
+    if (selectedIndex < 0 || selectedIndex >= rows.length - 1) return;
+    const current = rows[selectedIndex];
+    const next = rows[selectedIndex + 1];
+    const merged: EditableSubtitle = {
+      ...current,
+      end_ms: next.end_ms,
+      en_text: `${current.en_text.trim()} ${next.en_text.trim()}`.replace(/\s+/g, " ").trim(),
+      zh_text: `${current.zh_text.trim()} ${next.zh_text.trim()}`.replace(/\s+/g, " ").trim(),
+    };
+    const items = [...rows];
+    items.splice(selectedIndex, 2, merged);
+    commitRows(items, selectedIndex);
+  }
+
+  function splitSelectedSubtitle() {
+    if (selectedIndex < 0) return;
+    const current = rows[selectedIndex];
+    if (current.end_ms - current.start_ms < 400) return;
+    const midpoint = Math.round((current.start_ms + current.end_ms) / 2);
+    const [firstEn, secondEn] = splitText(current.en_text);
+    const [firstZh, secondZh] = splitText(current.zh_text);
+    const first: EditableSubtitle = {
+      ...current,
+      end_ms: midpoint,
+      en_text: firstEn || current.en_text,
+      zh_text: firstZh,
+    };
+    const second: EditableSubtitle = {
+      id: null,
+      start_ms: midpoint,
+      end_ms: current.end_ms,
+      en_text: secondEn,
+      zh_text: secondZh,
+      sort_order: current.sort_order + 1,
+    };
+    const items = [...rows];
+    items.splice(selectedIndex, 1, first, second);
+    commitRows(items, selectedIndex + 1);
+  }
+
+  function clearLockedReturnTimer() {
+    if (lockedReturnTimerRef.current) {
+      window.clearTimeout(lockedReturnTimerRef.current);
+      lockedReturnTimerRef.current = null;
+    }
+  }
+
+  function setSubtitleLock(locked: boolean) {
+    subtitleLockedRef.current = locked;
+    setSubtitleLocked(locked);
+    if (!locked) clearLockedReturnTimer();
+  }
+
+  function scrollToRowAnchor(index: number, behavior: ScrollBehavior = "smooth") {
+    const container = timelineRef.current;
+    const item = rowRefs.current[index];
+    if (!container || !item) return;
+    const containerRect = container.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    const anchor = container.clientHeight * 0.34;
+    const nextTop = container.scrollTop + itemRect.top - containerRect.top - anchor;
+    autoReturningRef.current = true;
+    container.scrollTo({ top: Math.max(0, nextTop), behavior });
+    window.setTimeout(() => {
+      autoReturningRef.current = false;
+    }, behavior === "smooth" ? 900 : 120);
+  }
+
+  function scrollToCurrentPlayback() {
+    const currentTime = Math.floor((videoRef.current?.currentTime ?? 0) * 1000);
+    const nextIndex = findIndexAt(currentTime, rows);
+    if (nextIndex >= 0) {
+      currentIndexRef.current = nextIndex;
+      setCurrentIndex(nextIndex);
+      setActiveIndex(nextIndex);
+      scrollToRowAnchor(nextIndex);
+    }
+  }
+
+  function scheduleLockedReturn() {
+    clearLockedReturnTimer();
+    if (!subtitleLockedRef.current) return;
+    lockedReturnTimerRef.current = window.setTimeout(() => {
+      lockedReturnTimerRef.current = null;
+      if (!subtitleLockedRef.current) return;
+      scrollToCurrentPlayback();
+    }, LOCKED_RETURN_DELAY_MS);
+  }
+
+  function beginEditingRow(index: number) {
+    setActiveIndex(index);
+    clearLockedReturnTimer();
+  }
+
+  function toggleSubtitleLock() {
+    if (subtitleLockedRef.current) {
+      setSubtitleLock(false);
+      return;
+    }
+    setSubtitleLock(true);
+    scrollToCurrentPlayback();
+  }
+
+  function updateRow(index: number, patch: Partial<EditableSubtitle>) {
+    setRows((prev) => prev.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+    setActiveIndex(index);
+    setDirty(true);
+  }
+
+  function seekTo(row: EditableSubtitle, index: number, shouldPlay = true) {
+    setActiveIndex(index);
+    setCurrentIndex(index);
+    currentIndexRef.current = index;
     const el = videoRef.current;
     if (!el) return;
     el.currentTime = row.start_ms / 1000 + 0.001;
-    void el.play();
+    if (shouldPlay) {
+      void el.play();
+      if (subtitleLockedRef.current) scrollToRowAnchor(index);
+    } else {
+      el.pause();
+      setSubtitleLock(true);
+      scheduleLockedReturn();
+    }
   }
 
   async function saveAndExit() {
@@ -288,8 +501,8 @@ export default function AdminSubtitlesPage() {
         </Card>
       )}
 
-      <div className="grid min-h-[74vh] gap-5 xl:grid-cols-[minmax(0,1fr)_42rem]">
-        <section className="surface bg-white p-4">
+      <div className="grid min-h-[74vh] gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(30rem,0.85fr)] 2xl:grid-cols-[minmax(44rem,1.35fr)_minmax(36rem,0.9fr)]">
+        <section className="surface bg-white p-5">
           <div className="sticky top-24 overflow-hidden rounded-lg border-2 border-foreground bg-black shadow-soft">
             {video?.file_url ? (
               <div className="relative">
@@ -308,10 +521,41 @@ export default function AdminSubtitlesPage() {
         </section>
 
         <section className="surface bg-white p-3">
-          <div className="flex items-center justify-between gap-3 px-2 py-2">
+          <div className="flex flex-wrap items-start justify-between gap-3 px-2 py-2">
             <h2 className="text-xl font-black">字幕列表（{rows.length} 句）</h2>
             {dirty && <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-black text-amber-900">有未保存修改</span>}
           </div>
+          <div className="mb-2 flex flex-wrap items-center gap-2 px-2">
+            <Button type="button" size="sm" variant="outline" onClick={() => addSubtitleAfterSelection()}>
+              <Plus className="h-4 w-4" />
+              新增
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={mergeSelectedSubtitle} disabled={selectedIndex < 0 || selectedIndex >= rows.length - 1}>
+              <Check className="h-4 w-4" />
+              合并
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={splitSelectedSubtitle} disabled={!selectedRow || selectedRow.end_ms - selectedRow.start_ms < 400}>
+              <Scissors className="h-4 w-4" />
+              拆分
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={deleteSelectedSubtitle} disabled={selectedIndex < 0}>
+              <Trash2 className="h-4 w-4" />
+              删除
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={subtitleLocked ? "brand" : "outline"}
+              onClick={toggleSubtitleLock}
+              title={subtitleLocked ? "取消锁定字幕列表" : "锁定字幕列表，让当前播放字幕固定在同一位置切换"}
+            >
+              {subtitleLocked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
+              {subtitleLocked ? "取消锁定" : "锁定"}
+            </Button>
+          </div>
+          <p className="px-2 pb-2 text-xs font-bold text-muted-foreground">
+            {subtitleLocked ? "锁定中：播放字幕会固定回到同一位置；编辑时不会立即回弹。" : "未锁定：只高亮当前播放字幕，不自动移动列表。"}
+          </p>
 
           {isLoading ? (
             <div className="space-y-3 p-2">
@@ -320,39 +564,114 @@ export default function AdminSubtitlesPage() {
               ))}
             </div>
           ) : rows.length > 0 ? (
-            <div className="thin-scrollbar max-h-[70vh] space-y-3 overflow-auto p-2">
+            <div
+              ref={timelineRef}
+              className="thin-scrollbar max-h-[70vh] space-y-5 overflow-auto p-2 pr-3 [scroll-padding-top:32px]"
+              onScroll={() => {
+                if (!subtitleLockedRef.current || autoReturningRef.current) return;
+                scheduleLockedReturn();
+              }}
+            >
               {rows.map((row, index) => (
                 <article
                   key={`${row.id ?? "new"}-${index}`}
+                  ref={(node) => {
+                    rowRefs.current[index] = node;
+                  }}
+                  data-subtitle-index={index}
                   className={cn(
-                    "grid gap-3 rounded-lg border p-3 text-sm transition-colors sm:grid-cols-[4.5rem_minmax(0,1fr)]",
-                    index === currentIndex ? "border-brand bg-brand/10" : "border-foreground/10 bg-white hover:bg-muted/30"
+                    "group grid cursor-pointer gap-3 text-sm sm:grid-cols-[4.9rem_minmax(0,1fr)]",
+                    index === activeIndex && "active",
+                    index === currentIndex && "playing"
                   )}
+                  onClick={() => seekTo(row, index, true)}
                 >
-                  <button type="button" className="text-left font-mono text-xs font-bold text-muted-foreground" onClick={() => seekTo(row)}>
+                  <button
+                    type="button"
+                    className={cn(
+                      "pt-2 text-left font-mono text-xs font-bold tabular-nums text-muted-foreground transition-colors",
+                      index === currentIndex && "text-[#476b97]",
+                      index === activeIndex && "text-foreground"
+                    )}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      seekTo(row, index, true);
+                    }}
+                  >
                     <span className="block text-foreground">#{index + 1}</span>
                     <span>{formatMs(row.start_ms)}</span>
                     <span className="block">{formatMs(row.end_ms)}</span>
                   </button>
-                  <div className="space-y-2">
-                    <div className="flex flex-wrap gap-2">
+                  <div
+                    className={cn(
+                      "relative min-h-[84px] rounded-lg border border-foreground/10 bg-white p-4 shadow-sm transition-[background,border-color,box-shadow]",
+                      index === activeIndex && "border-[#e3ca63] bg-[#fff7cf] shadow-[0_0_0_2px_rgba(227,202,99,0.28)]",
+                      index === currentIndex && index !== activeIndex && "border-[#9bb6d9] bg-[#f3f7fd] shadow-[0_0_0_2px_rgba(155,182,217,0.28)]"
+                    )}
+                  >
+                    <div className="absolute right-2 top-2 hidden gap-1 group-hover:flex group-focus-within:flex">
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 bg-white/80"
+                        title="播放"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          seekTo(row, index, true);
+                        }}
+                      >
+                        <Captions className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 bg-white/80"
+                        title="Insert subtitle"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          addSubtitleAfterSelection(index);
+                        }}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <div className="mb-2 flex flex-wrap gap-2 pr-20" onClick={(event) => event.stopPropagation()}>
                       <Input
                         type="number"
                         step="0.01"
                         value={seconds(row.start_ms)}
+                        onFocus={() => beginEditingRow(index)}
                         onChange={(e) => updateRow(index, { start_ms: msFromSeconds(e.target.value) })}
-                        className="h-8 w-24 font-mono"
+                        className={cn("h-8 w-24 font-mono", index === activeIndex && "border-[#c2aa38]/40 bg-white/70")}
                       />
                       <Input
                         type="number"
                         step="0.01"
                         value={seconds(row.end_ms)}
+                        onFocus={() => beginEditingRow(index)}
                         onChange={(e) => updateRow(index, { end_ms: msFromSeconds(e.target.value) })}
-                        className="h-8 w-24 font-mono"
+                        className={cn("h-8 w-24 font-mono", index === activeIndex && "border-[#c2aa38]/40 bg-white/70")}
                       />
                     </div>
-                    <Textarea value={row.en_text} onChange={(e) => updateRow(index, { en_text: e.target.value })} rows={2} />
-                    <Textarea value={row.zh_text} onChange={(e) => updateRow(index, { zh_text: e.target.value })} rows={1} placeholder="中文字幕，可选" />
+                    <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
+                      <Textarea
+                        value={row.en_text}
+                        onFocus={() => beginEditingRow(index)}
+                        onChange={(e) => updateRow(index, { en_text: e.target.value })}
+                        rows={2}
+                        className={cn(index === activeIndex && "text-foreground")}
+                      />
+                      <Textarea
+                        value={row.zh_text}
+                        onFocus={() => beginEditingRow(index)}
+                        onChange={(e) => updateRow(index, { zh_text: e.target.value })}
+                        rows={1}
+                        placeholder="中文字幕，可选"
+                        className={cn(index === activeIndex && "text-foreground")}
+                      />
+                    </div>
                   </div>
                 </article>
               ))}
