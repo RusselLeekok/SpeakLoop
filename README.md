@@ -1,123 +1,216 @@
-# SpeakLoop · 英语听力与口语跟读播放器
+# SpeakLoop
 
-管理员在后台上传视频和 `.vtt` / `.srt` 字幕，后端真实解析字幕并统一转换为毫秒时间轴；
-普通用户在前台选视频进入学习播放器，字幕严格跟随 `video.currentTime` 高亮，支持点句跳转、
-单句循环、上一句/下一句、倍速、字幕模式切换和学习进度记忆。
+SpeakLoop 是一个面向英语精听、自主跟读和字幕学习的全栈视频学习平台。它把“素材管理、字幕处理、逐句播放、重点词句精读”放在同一个工作流里，适合用来搭建个人英语精听库、课程素材库，或给团队维护一套可持续更新的英语视频学习系统。
+
+## 它用来做什么
+
+很多英语视频平台只负责播放，真正学习时还要在播放器、字幕文件、笔记、词典之间来回切。SpeakLoop 的目标是把这些动作收在一个产品里：
+
+- 管理员上传视频、导入在线视频，或对已有视频生成 / 重传字幕。
+- 系统把字幕整理成可逐句定位的时间轴，供前台播放器精听使用。
+- 学习者可以按句跳转、循环、调速、隐藏字幕、打开跟随字幕。
+- 重点词和短语可以在字幕中轻量标注，并在精读卡片里集中复习。
+- 后台可以对字幕轨做新增、删除、合并、拆分、锁定跟随和校对。
+
+## 产品展示
+
+### 前台学习工作台
+
+前台用于浏览素材、筛选分类、进入精听学习。左侧保留学习统计和快捷入口，中间展示已发布视频库。
+
+![Frontend workspace](docs/assets/speakloop-library-showcase.png)
+
+### 后台视频管理
+
+后台用于上传、发布、下架、搜索和管理视频。每条素材都能看到处理状态、字幕数量、发布时间和后续编辑入口。
+
+![Admin video management](docs/assets/speakloop-admin-showcase.png)
+
+### 字幕轨道编辑
+
+字幕编辑页支持边看视频边校对字幕，并提供字幕新增、合并、拆分、删除、锁定跟随等操作。
+
+![Subtitle editor](docs/assets/speakloop-subtitle-editor-showcase.png)
+
+## 核心亮点
+
+- **逐句精听播放器**：字幕跟随 `video.currentTime` 高亮，支持点击字幕跳转、单句循环、上一句 / 下一句、5 秒快退快进、倍速播放。
+- **精读学习模式**：字幕中的重点词和短语以轻下划线标注，可打开词卡、发音、标记认识 / 不认识，并按当前学习上下文排序。
+- **字幕轨道编辑器**：后台支持字幕行新增、删除、合并、拆分、时间轴锁定、当前播放句回到固定锚点，便于快速校对。
+- **视频素材后台**：支持上传本地视频、导入 URL、封面、分类、标签、状态流转、发布 / 下架。
+- **自动字幕能力**：后端集成 `faster-whisper`，可对视频音轨生成字幕，并通过 Celery worker 异步处理任务。
+- **双语字幕结构**：英文字幕作为主时间轴，中文翻译可作为可选字段展示，适合精听、盲听、填空和跟读。
+- **学习进度记忆**：登录用户可保存服务端进度，未登录时也可保留浏览器本地进度。
+- **Docker 一键启动**：前端、后端、MySQL、Redis、worker 通过 Docker Compose 统一编排。
 
 ## 技术栈
 
-- **前端** `frontend/`：Next.js 14 App Router · React 18 · TypeScript · Tailwind CSS · shadcn 风格组件 · Zustand · TanStack Query · HTML5 video
-- **后端** `backend/`：FastAPI · SQLAlchemy 2.0 · Alembic · Pydantic v2 · JWT + RBAC · 文件保存在本地 `backend/uploads/`
-- **数据库**：MySQL 8（utf8mb4 / utf8mb4_unicode_ci）
+| 模块 | 技术 |
+| --- | --- |
+| 前端 | Next.js 14 App Router, React 18, TypeScript, Tailwind CSS, Zustand, TanStack Query |
+| 后端 | FastAPI, SQLAlchemy 2, Pydantic v2, JWT, RBAC |
+| 异步任务 | Celery, Redis |
+| 数据库 | MySQL 8 |
+| 媒体处理 | yt-dlp, faster-whisper, FFmpeg |
+| 部署 | Docker Compose |
 
-## 快速启动
+## 快速部署
 
-### 1. 准备数据库
-
-在本机 MySQL 8 里创建数据库：
-
-```sql
-CREATE DATABASE speakloop CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-### 2. 启动后端（端口 8000）
+### 1. 克隆项目
 
 ```bash
-cd backend
-python -m venv .venv               # 已创建则跳过
-.venv\Scripts\pip install -r requirements.txt
+git clone git@github.com:RusselLeekok/speakLoop.git
+cd speakLoop
 ```
 
-编辑 `backend/.env`（已从 `.env.example` 生成），**把 `DATABASE_URL` 中的密码改成你自己的 MySQL 密码**：
-
-```
-DATABASE_URL=mysql+pymysql://root:你的密码@127.0.0.1:3306/speakloop?charset=utf8mb4
-```
-
-然后启动：
+### 2. 准备环境变量
 
 ```bash
-.venv\Scripts\python -m uvicorn app.main:app --reload --port 8000
+cp .env.example .env
 ```
 
-首次启动会自动建表并创建两个账号（可在 `.env` 修改或关闭）：
+本地体验可以直接使用默认值。正式部署前请至少修改：
+
+```env
+JWT_SECRET=replace-with-a-long-random-secret
+MYSQL_PASSWORD=replace-with-a-strong-password
+MYSQL_ROOT_PASSWORD=replace-with-a-strong-root-password
+ADMIN_PASSWORD=replace-with-a-strong-admin-password
+```
+
+### 3. 一键启动
+
+```bash
+docker compose up -d --build
+```
+
+启动后访问：
+
+- 前台：<http://localhost:3000>
+- 备用前台端口：<http://localhost:13000>
+- 后端 API：<http://localhost:18000/api/health>
+- 后台登录：<http://localhost:3000/admin/login>
+
+默认账号：
 
 | 账号 | 密码 | 角色 |
-|---|---|---|
-| `admin` | `admin123456` | 管理员，可进后台 |
-| `user` | `user123456` | 普通用户，用于云端进度同步 |
+| --- | --- | --- |
+| `admin` | `admin123456` | 管理员 |
+| `user` | `user123456` | 普通学习用户 |
 
-> 建表方式：默认 `AUTO_CREATE_TABLES=true` 启动时自动建表；也可以改用 Alembic：
-> `.venv\Scripts\python -m alembic upgrade head`
+> 正式环境务必修改默认账号密码。
 
-### 3. 启动前端（端口 3000）
+## 推荐启动顺序
+
+如果你的机器上 Docker / MySQL 启动较慢，后端可能会比数据库更早启动。可以使用更稳的分步启动方式：
+
+```bash
+docker compose up -d mysql redis
+docker compose ps
+docker compose up -d backend worker frontend
+```
+
+确认服务：
+
+```bash
+docker compose ps
+docker compose logs -f backend
+```
+
+## 常用命令
+
+```bash
+# 启动全部服务
+docker compose up -d
+
+# 重建并启动
+docker compose up -d --build
+
+# 重启前端
+docker compose restart frontend
+
+# 重启后端和任务 worker
+docker compose restart backend worker
+
+# 查看日志
+docker compose logs -f backend
+docker compose logs -f worker
+
+# 停止服务，但保留数据库和上传文件卷
+docker compose down
+```
+
+## 本地开发
+
+前端：
 
 ```bash
 cd frontend
-npm install                        # 已安装则跳过
+npm install
 npm run dev
 ```
 
-如后端不在 `http://localhost:8000`，复制 `.env.local.example` 为 `.env.local` 修改。
+后端：
 
-### 4. 走一遍完整流程
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python -m uvicorn app.main:app --reload --port 8000
+```
 
-1. 打开 `http://localhost:3000/admin/login`，用 `admin / admin123456` 登录后台。
-2. 「视频管理 → 新增视频」：填标题，选一个 `.mp4` / `.webm` 视频，
-   英文字幕选 `samples/sample_en.vtt`（时间轴需匹配你自己的视频，示例文件仅供体验流程），
-   中文字幕可选 `samples/sample_zh.srt`，勾选「立即发布」后保存。
-3. 上传后会显示解析出的字幕数量和 warning；进「字幕预览」页可以边播边点句核对时间轴。
-4. 打开 `http://localhost:3000` 前台首页，进入视频 →「开始学习」。
-5. 学习页：空格播放/暂停，←/→ 上一句/下一句，R 单句循环；点右侧任意字幕跳转；
-   刷新页面会自动恢复上次学习进度（登录用户存服务端，游客存浏览器本地）。
+如果不用 Docker，需要自行准备 MySQL 8 和 Redis，并在 `.env` 中配置：
+
+```env
+DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/speakloop?charset=utf8mb4
+REDIS_URL=redis://127.0.0.1:6379/0
+```
 
 ## 目录结构
 
-```
+```text
 backend/
   app/
-    main.py               # FastAPI 入口、CORS、/uploads 静态挂载、启动建表+种子账号
-    config.py             # .env 配置
-    database.py           # SQLAlchemy engine / session
-    models.py             # users / videos / subtitles / subtitle_sources / subtitle_warnings / learning_progress
-    schemas.py            # Pydantic 模型
-    security.py           # bcrypt + JWT
-    deps.py               # get_current_user / require_admin（RBAC）
-    subtitle_parser.py    # .vtt/.srt 解析、毫秒转换、校验、中英按时间轴合并
-    storage.py            # uploads/ 文件保存与清理
+    main.py              # FastAPI 入口、CORS、uploads 静态资源、启动初始化
+    config.py            # 环境变量配置
+    database.py          # SQLAlchemy engine / session
+    models.py            # 用户、视频、字幕、任务、学习进度等模型
     routers/
-      auth.py             # POST /api/auth/login, GET /api/auth/me
-      admin.py            # /api/admin/*（仅 admin）：上传/列表/编辑/删除/重传字幕/字幕查看/统计
-      public.py           # /api/videos*（仅已发布）、学习进度
-  alembic/                # 迁移脚手架（0001_init）
-  uploads/                # 视频 / 字幕 / 封面 / 录音（第二阶段）
+      auth.py            # 登录与当前用户
+      admin.py           # 后台视频、字幕、任务、标签管理
+      public.py          # 前台视频、字幕、学习进度接口
+    tasks.py             # Celery 异步任务
+    media_tools.py       # 下载、封面、媒体分析工具
+    subtitle_ops.py      # 字幕清理与替换逻辑
 frontend/
   src/app/
-    page.tsx                       # 前台首页：搜索、分类筛选、视频卡片
-    login/                         # 用户登录（进度云端同步）
-    videos/[videoId]/              # 视频详情页
-    learn/[videoId]/               # 学习播放器（核心页面）
-    admin/                         # 后台：登录 / 概览 / 视频管理 / 新增 / 编辑 / 字幕预览
-  src/lib/                         # api 客户端(XHR 上传进度)、zustand auth、本地进度、类型
-  src/components/                  # shadcn 风格 UI 组件
-samples/                           # 示例字幕文件（仅用于体验上传流程）
+    page.tsx             # 前台工作台
+    learn/[videoId]/     # 精听播放器
+    admin/               # 后台管理页面
+  src/components/        # UI 组件和业务组件
+  src/lib/               # API client、auth store、本地进度等
+docs/assets/             # README 产品展示图
+docker-compose.yml       # 本地和单机部署编排
 ```
 
-## 核心设计
+## 工作流
 
-- **时间源**：学习页用 `requestAnimationFrame` 循环读取 `video.currentTime`（唯一时间源），
-  二分查找命中当前字幕，只在字幕切换时更新 React state；卸载时取消 rAF。
-  字幕不用任何定时器自行推进。
-- **字幕解析**：后端解析 `.vtt`/`.srt` → `start_ms`/`end_ms`；校验时间为负、start≥end、乱序（自动重排）、
-  空字幕（过滤）、严重重叠（warning）、字幕超出视频时长（warning）；编码支持 UTF-8 / UTF-16 / GB18030。
-- **中英合并**：英文字幕是主时间轴，中文字幕按时间重叠度对齐为 `zh_text`，未覆盖的句子产生 warning。
-- **权限**：JWT + `role` 字段；`/api/admin/*` 全部经过 `require_admin`；
-  前台接口只返回 `status = published` 的视频，其余状态一律 404。
-- **失败清理**：视频文件非法 → 400 并删除已写入文件；字幕解析失败 → 视频记录标记 `failed`
-  （方便管理员重传字幕），不保留半成品字幕数据；重传解析失败时旧字幕保持不变。
+1. 管理员进入后台，上传视频或导入视频 URL。
+2. 系统分析媒体，提取封面、音轨、视频时长等信息。
+3. 管理员上传字幕，或使用 Whisper 自动生成字幕。
+4. 在字幕编辑页校对时间轴和文本，必要时合并、拆分、删除或新增字幕行。
+5. 发布视频后，学习者在前台视频库看到素材。
+6. 学习者进入播放页进行精听、跟读、精读和词句复习。
 
-## 第二阶段预留
+## 生产部署提示
 
-- `uploads/recordings/` 目录与 MediaRecorder 跟读录音
-- 用户注册、收藏句子、单词卡、AI 翻译/讲解/口语评分
-- `learning_progress` 已按 `(user_id, video_id)` 唯一约束设计，可直接扩展学习统计
+- 使用强随机 `JWT_SECRET`，并修改默认账号密码。
+- 将 `CORS_ORIGINS` 改成你的真实域名。
+- 为前端和后端配置 HTTPS 反向代理。
+- 持久化 `speakloop_app_mysql_data` 和 `speakloop_app_uploads_data` 两个 Docker volume。
+- 如果要长时间跑 Whisper，建议给 worker 单独分配更充足的 CPU / 内存，或切换到 GPU 环境。
+- 大视频上传前确认 `MAX_VIDEO_SIZE_MB`、反向代理 body size、磁盘空间都足够。
+
+## License
+
+当前仓库未声明开源许可证。发布或商用前请先补充明确的 License。
